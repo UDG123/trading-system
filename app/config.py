@@ -17,9 +17,22 @@ if DATABASE_URL.startswith("postgres://"):
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me-in-production")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # legacy fallback
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
+
+# ─────────────────────────────────────────────────────────────
+# TELEGRAM — Per-Desk Channel Routing
+# ─────────────────────────────────────────────────────────────
+TELEGRAM_DESK_CHANNELS = {
+    "DESK1_SCALPER":   os.getenv("TG_DESK1", "-1003216826596"),
+    "DESK2_INTRADAY":  os.getenv("TG_DESK2", "-1003789191641"),
+    "DESK3_SWING":     os.getenv("TG_DESK3", "-1003813056839"),
+    "DESK4_GOLD":      os.getenv("TG_DESK4", "-1003711906528"),
+    "DESK5_ALTS":      os.getenv("TG_DESK5", "-1003868629189"),
+    "DESK6_EQUITIES":  os.getenv("TG_DESK6", "-1003752836585"),
+}
+TELEGRAM_PORTFOLIO_CHAT = os.getenv("TG_PORTFOLIO", "-1003614474777")
 
 # ─────────────────────────────────────────────────────────────
 # FIRM-WIDE RISK
