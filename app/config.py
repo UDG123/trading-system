@@ -83,7 +83,7 @@ DESKS: Dict[str, dict] = {
     "DESK1_SCALPER": {
         "name": "Rapid Execution",
         "style": "Scalper",
-        "symbols": ["EURUSD", "USDJPY", "GBPUSD", "USDCHF"],
+        "symbols": ["EURUSD", "USDJPY", "GBPUSD", "USDCHF", "XAGUSD"],
         "timeframes": {"bias": "15M", "confirmation": "5M", "entry": "1M"},
         "luxalgo_preset": "Scalper",
         "ml_classifier": 34,
@@ -170,7 +170,7 @@ DESKS: Dict[str, dict] = {
     "DESK6_EQUITIES": {
         "name": "Equities",
         "style": "Stock Trend",
-        "symbols": ["TSLA", "MEGA_CAP_BASKET"],
+        "symbols": ["TSLA", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "NFLX", "AMD"],
         "timeframes": {"bias": "D", "confirmation": "4H", "entry": "1H"},
         "luxalgo_preset": "Trend Trader",
         "ml_classifier": 500,
@@ -222,12 +222,22 @@ SYMBOL_ALIASES = {
     "FX:GBPJPY": "GBPJPY",
     "FX:AUDJPY": "AUDJPY",
     "OANDA:XAUUSD": "XAUUSD",
+    "OANDA:XAGUSD": "XAGUSD",
+    "FXOPEN:XAGUSD": "XAGUSD",
     "TVC:DJI": "US30",
     "TVC:NDQ": "US100",
     "NASDAQ:NDX": "NAS100",
     "COINBASE:BTCUSD": "BTCUSD",
     "COINBASE:ETHUSD": "ETHUSD",
     "NASDAQ:TSLA": "TSLA",
+    "NASDAQ:AAPL": "AAPL",
+    "NASDAQ:MSFT": "MSFT",
+    "NASDAQ:NVDA": "NVDA",
+    "NASDAQ:AMZN": "AMZN",
+    "NASDAQ:META": "META",
+    "NASDAQ:GOOGL": "GOOGL",
+    "NASDAQ:NFLX": "NFLX",
+    "NASDAQ:AMD": "AMD",
 }
 
 
