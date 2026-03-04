@@ -77,15 +77,24 @@ class SignalValidator:
                     f"Bearish signal but TP1 ({alert.tp1}) >= price ({alert.price})"
                 )
 
-        # 7. Check alert type is allowed for matched desks
+        # 7. Filter desks that don't allow this alert type
+        filtered_desks = []
         for desk_id in matched_desks:
             desk = DESKS.get(desk_id)
             if desk and desk.get("alerts") != "ALL":
                 allowed = desk.get("alerts", [])
                 if alert.alert_type not in allowed:
-                    errors.append(
-                        f"Alert '{alert.alert_type}' not in {desk_id} allowed list"
+                    logger.debug(
+                        f"Alert '{alert.alert_type}' not in {desk_id} allowed list — skipping desk"
                     )
+                    continue
+            filtered_desks.append(desk_id)
+        matched_desks = filtered_desks
+
+        if not matched_desks:
+            errors.append(
+                f"Alert '{alert.alert_type}' not allowed by any matched desk"
+            )
 
         # 8. Timeframe sanity (basic - full session check is Phase 2)
         if not alert.timeframe:
