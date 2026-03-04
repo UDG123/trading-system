@@ -190,3 +190,4 @@ curl -X POST http://localhost:8000/api/webhook \
 - [ ] **Phase 3** — ZeroMQ bridge, MT5 EA execution
 - [ ] **Phase 4** — Telegram bot, kill switch, dashboard
 - [ ] **Phase 5** — Weekly retraining, strategy memos, board reports
+ 
