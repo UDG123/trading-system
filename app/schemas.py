@@ -54,8 +54,51 @@ class TradingViewAlert(BaseModel):
     @field_validator("alert_type")
     @classmethod
     def normalize_alert_type(cls, v: str) -> str:
-        """Normalize alert type to lowercase snake_case."""
-        return v.strip().lower().replace(" ", "_").replace("-", "_")
+        """Normalize alert type to lowercase snake_case.
+        Handles both direct alert_type codes and LuxAlgo {default} messages.
+        """
+        # LuxAlgo {default} message → internal alert_type mapping
+        luxalgo_message_map = {
+            "bullish confirmation signal": "bullish_confirmation",
+            "bearish confirmation signal": "bearish_confirmation",
+            "bullish+ confirmation signal": "bullish_plus",
+            "bearish+ confirmation signal": "bearish_plus",
+            "strong bullish confirmation signal": "bullish_plus",
+            "strong bearish confirmation signal": "bearish_plus",
+            "bullish exit signal": "bullish_exit",
+            "bearish exit signal": "bearish_exit",
+            "bullish contrarian signal": "contrarian_bullish",
+            "bearish contrarian signal": "contrarian_bearish",
+            "confirmation turn bullish": "confirmation_turn_bullish",
+            "confirmation turn bearish": "confirmation_turn_bearish",
+            "confirmation turn plus": "confirmation_turn_plus",
+            "take profit": "take_profit",
+            "stop loss": "stop_loss",
+            "smart trail cross": "smart_trail_cross",
+            "smart trail crossed": "smart_trail_cross",
+            # SMC structure alerts
+            "internal bullish bos formed": "smc_bullish_bos",
+            "bearish bos formed": "smc_bearish_bos",
+            "internal bullish choch formed": "smc_bullish_choch",
+            "bearish choch formed": "smc_bearish_choch",
+            "bullish fvg formed": "smc_bullish_fvg",
+            "bearish fvg formed": "smc_bearish_fvg",
+            "equal highs detected": "smc_equal_highs",
+            "equal lows detected": "smc_equal_lows",
+            "price broke bullish internal ob": "smc_bullish_ob_break",
+            "price broke bearish internal ob": "smc_bearish_ob_break",
+            "price broke bullish swing ob": "smc_bullish_ob_break",
+            "price broke bearish swing ob": "smc_bearish_ob_break",
+        }
+
+        cleaned = v.strip().lower()
+
+        # Check if it's a LuxAlgo default message
+        if cleaned in luxalgo_message_map:
+            return luxalgo_message_map[cleaned]
+
+        # Otherwise normalize to snake_case
+        return cleaned.replace(" ", "_").replace("-", "_").replace("+", "_plus")
 
     @field_validator("symbol")
     @classmethod

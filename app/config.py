@@ -207,6 +207,18 @@ VALID_ALERT_TYPES = [
     "take_profit",
     "stop_loss",
     "smart_trail_cross",
+    # Smart Money Concepts (SMC) alerts
+    "smc_structure",
+    "smc_bullish_bos",
+    "smc_bearish_bos",
+    "smc_bullish_choch",
+    "smc_bearish_choch",
+    "smc_bullish_fvg",
+    "smc_bearish_fvg",
+    "smc_equal_highs",
+    "smc_equal_lows",
+    "smc_bullish_ob_break",
+    "smc_bearish_ob_break",
 ]
 
 # Symbol normalization map (TradingView → internal)
