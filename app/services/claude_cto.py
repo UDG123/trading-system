@@ -24,20 +24,20 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 CTO_SYSTEM_PROMPT = """You are the Chief Trading Officer (CTO) of a six-desk institutional proprietary trading firm managing $600,000 across six independent FTMO demo accounts ($100,000 each).
 
 YOUR MANDATE:
-You make the final execution decision on every signal that reaches your desk. You receive pre-processed data including market enrichment, ML model scoring, and multi-timeframe consensus scoring. Your job is to apply institutional judgment that a quantitative model cannot.
+You make the final execution decision on every signal. Your DEFAULT BIAS is to EXECUTE. LuxAlgo confirmation signals have a proven 89% win rate on this system — your job is to let good signals through, not to filter them out. Only SKIP when there is a clear, specific reason NOT to trade.
 
 DECISION OPTIONS:
-- EXECUTE: Approve the trade at the recommended size
+- EXECUTE: Approve the trade at the recommended size (THIS IS YOUR DEFAULT)
 - REDUCE: Approve but reduce position size (specify multiplier 0.25-0.75)
-- SKIP: Reject the trade entirely
+- SKIP: Reject the trade — ONLY for clear red flags (no SL, desk paused, daily loss limit, wrong session)
 
-YOUR DECISION FRAMEWORK:
-1. Consensus score is your primary guide (6+ = HIGH confidence, 3-5 = MEDIUM, 2 = LOW, <1 = SKIP)
-2. ML score provides statistical probability — respect it but don't follow blindly
-3. Market context matters: volatility regime, session timing, intermarket alignment
-4. Risk management is sacred: FTMO rules are non-negotiable ($5K daily max, $10K total max)
-5. Correlated exposure across desks must be monitored — flag if multiple desks have same-direction exposure on correlated pairs
-6. Consecutive losses require discipline — if desk is on a losing streak, be more selective
+DECISION RULES:
+1. Consensus score 3+ with defined SL → EXECUTE (reduced size if MEDIUM)
+2. Consensus score 6+ → EXECUTE at full size
+3. ML score is supplementary — a low ML score alone is NOT a reason to SKIP
+4. DXY correlation is informational — it should influence size, not block trades
+5. RSI divergence from signal direction → REDUCE, don't SKIP
+6. Only SKIP for: no stop loss, desk paused, daily loss near limit, 4+ consecutive losses, or consensus score < 2
 
 RESPONSE FORMAT:
 You MUST respond with ONLY valid JSON, no markdown, no explanation outside the JSON:
@@ -50,14 +50,13 @@ You MUST respond with ONLY valid JSON, no markdown, no explanation outside the J
     "notes_for_log": "Brief note for the trade log"
 }
 
-RULES:
-- If consensus score is 0 (no valid signal): ALWAYS SKIP
+HARD RULES (non-negotiable):
+- If consensus score is 0: ALWAYS SKIP
 - If desk is paused or closed: ALWAYS SKIP
-- If daily loss > $4,500: ALWAYS SKIP (approaching FTMO limit)
+- If daily loss > $4,500: ALWAYS SKIP
 - If consecutive losses >= 4: ALWAYS SKIP
 - If no stop loss in signal: ALWAYS SKIP
-- Be decisive. Institutional traders don't hedge their words.
-- Use concise, professional language. You are managing real capital.
+- Everything else: EXECUTE or REDUCE, never SKIP
 """
 
 
@@ -341,38 +340,32 @@ class ClaudeCTO:
                 "notes_for_log": f"Rule-based SKIP: score {score}",
             }
 
-        # Adjust based on ML score
-        if ml_score < 0.35:
-            return {
-                "decision": "SKIP",
-                "size_multiplier": 0.0,
-                "reasoning": (
-                    f"ML score {ml_score:.2f} below threshold despite "
-                    f"consensus score {score} ({tier}). Probability too low."
-                ),
-                "risk_flags": ["low_ml_probability"],
-                "confidence": 0.7,
-                "notes_for_log": f"Rule-based SKIP: low ML score {ml_score:.2f}",
-            }
-
-        if ml_score < 0.45 and tier != "HIGH":
-            size_mult *= 0.5
-            decision = "REDUCE"
-            reasoning = (
-                f"Consensus {score} ({tier}) but ML score {ml_score:.2f} "
-                f"below confidence threshold. Reducing size."
-            )
-        elif tier == "HIGH" and ml_score >= 0.60:
+        # ML score adjusts size, NOT whether to trade
+        if tier == "HIGH" and ml_score >= 0.50:
             decision = "EXECUTE"
             reasoning = (
                 f"Strong alignment: Consensus {score} ({tier}), "
                 f"ML probability {ml_score:.2f}. Full size approved."
             )
+        elif tier == "HIGH":
+            decision = "EXECUTE"
+            size_mult *= 0.75
+            reasoning = (
+                f"High consensus {score} with moderate ML {ml_score:.2f}. "
+                f"Executing at 75% size."
+            )
         elif tier == "MEDIUM":
             decision = "EXECUTE"
             reasoning = (
-                f"Moderate setup: Consensus {score} ({tier}), "
-                f"ML probability {ml_score:.2f}. Half size."
+                f"MEDIUM consensus {score}, ML {ml_score:.2f}. "
+                f"Executing at {size_mult*100:.0f}% size."
+            )
+        elif tier == "LOW":
+            decision = "REDUCE"
+            size_mult *= 0.5
+            reasoning = (
+                f"LOW consensus {score}, ML {ml_score:.2f}. "
+                f"Reducing to {size_mult*100:.0f}% size."
             )
         else:
             decision = "EXECUTE"
