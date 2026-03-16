@@ -65,7 +65,9 @@ def _map_fields(p: dict) -> dict:
     if "ticker" in p and "symbol" not in p:
         p["symbol"] = p.pop("ticker")
     if "bartime" in p and "time" not in p:
-        p["time"] = p.pop("bartime")
+        p["time"] = str(p.pop("bartime"))
+    elif "time" in p and not isinstance(p["time"], str):
+        p["time"] = str(p["time"])
     if "alert_type" not in p:
         for k in ("alert", "signal", "type", "message", "condition"):
             if k in p:
