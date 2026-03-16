@@ -238,6 +238,9 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 trade_params["ema200"] = enrichment.get("ema200")
                 trade_params["session"] = enrichment.get("active_session", "UNKNOWN")
 
+            # Desk index for unique ticket generation
+            desk_idx = desks.index(desk_id) if desk_id in desks else 0
+
             if approved:
                 signal.status = "DECIDED"
                 signal.position_size_pct = trade_params.get("risk_pct")
@@ -263,12 +266,13 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 )
                 risk_dollars = desk_capital * (risk_pct / 100)
 
+                # Unique ticket: 900000 + signal_id * 10 + desk_index
                 trade_record = TradeModel(
                     signal_id=signal.id,
                     desk_id=desk_id,
                     symbol=signal_data.get("symbol"),
                     direction=signal_data.get("direction"),
-                    mt5_ticket=900000 + signal.id,  # 900000+ = server sim
+                    mt5_ticket=900000 + signal.id * 10 + desk_idx,
                     entry_price=entry_price,
                     lot_size=lot_size,
                     risk_pct=risk_pct,
@@ -373,7 +377,7 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     desk_id=desk_id,
                     symbol=signal_data.get("symbol"),
                     direction=signal_data.get("direction"),
-                    mt5_ticket=800000 + signal.id,
+                    mt5_ticket=800000 + signal.id * 10 + desk_idx,
                     entry_price=signal_data.get("price", 0),
                     lot_size=oni_lot,
                     risk_pct=oni_risk_pct,
