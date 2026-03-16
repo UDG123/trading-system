@@ -15,7 +15,7 @@ DATABASE_URL = os.getenv(
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-me-in-production")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "OniQuant_X9k7mP2w_2026")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # legacy fallback
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
