@@ -80,17 +80,17 @@ class TwelveDataEnricher:
             )
 
             # ── ATR (Average True Range) — volatility measure ──
-            if atr_data and "value" in atr_data:
-                atr = float(atr_data["value"])
+            if atr_data and ("atr" in atr_data or "value" in atr_data):
+                atr = float(atr_data.get("atr") or atr_data.get("value"))
                 enrichment["atr"] = round(atr, 5)
-                enrichment["atr_pct"] = round((atr / price) * 100, 4)
+                enrichment["atr_pct"] = round((atr / price) * 100, 4) if price > 0 else None
             else:
                 enrichment["atr"] = None
                 enrichment["atr_pct"] = None
 
             # ── RSI — momentum/overbought/oversold ──
-            if rsi_data and "value" in rsi_data:
-                rsi = float(rsi_data["value"])
+            if rsi_data and ("rsi" in rsi_data or "value" in rsi_data):
+                rsi = float(rsi_data.get("rsi") or rsi_data.get("value"))
                 enrichment["rsi"] = round(rsi, 2)
                 enrichment["rsi_zone"] = self._classify_rsi(rsi)
             else:
@@ -100,14 +100,14 @@ class TwelveDataEnricher:
             # ── EMA 50 & 200 — trend detection ──
             ema50 = None
             ema200 = None
-            if ema50_data and "value" in ema50_data:
-                ema50 = float(ema50_data["value"])
+            if ema50_data and ("ema" in ema50_data or "value" in ema50_data):
+                ema50 = float(ema50_data.get("ema") or ema50_data.get("value"))
                 enrichment["ema50"] = round(ema50, 5)
             else:
                 enrichment["ema50"] = None
 
-            if ema200_data and "value" in ema200_data:
-                ema200 = float(ema200_data["value"])
+            if ema200_data and ("ema" in ema200_data or "value" in ema200_data):
+                ema200 = float(ema200_data.get("ema") or ema200_data.get("value"))
                 enrichment["ema200"] = round(ema200, 5)
             else:
                 enrichment["ema200"] = None
@@ -176,6 +176,9 @@ class TwelveDataEnricher:
                 data = resp.json()
                 if "values" in data and data["values"]:
                     atr_data = data["values"][0]
+                    logger.debug(f"ATR raw keys: {list(atr_data.keys())}")
+                elif "status" in data and data["status"] == "error":
+                    logger.warning(f"ATR API error: {data.get('message', 'unknown')}")
         except Exception as e:
             logger.debug(f"ATR fetch failed: {e}")
 
@@ -191,6 +194,9 @@ class TwelveDataEnricher:
                 data = resp.json()
                 if "values" in data and data["values"]:
                     rsi_data = data["values"][0]
+                    logger.debug(f"RSI raw keys: {list(rsi_data.keys())}")
+                elif "status" in data and data["status"] == "error":
+                    logger.warning(f"RSI API error: {data.get('message', 'unknown')}")
         except Exception as e:
             logger.debug(f"RSI fetch failed: {e}")
 
