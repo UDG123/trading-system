@@ -40,14 +40,15 @@ class SignalValidator:
                 f"Symbol '{normalized_symbol}' does not match any desk"
             )
 
-        # 3. Price must be positive
-        if alert.price <= 0:
-            errors.append(f"Invalid price: {alert.price}")
+        # 3. Price should be positive (pipeline fetches live price as backup)
+        if alert.price <= 0 and not matched_desks:
+            errors.append(f"Invalid price: {alert.price} and no desk matched")
 
         # 4. For entry signals, we need at least SL1
         entry_types = {
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "contrarian_bullish", "contrarian_bearish",
         }
         if alert.alert_type in entry_types and alert.sl1 is None:
