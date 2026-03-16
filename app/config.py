@@ -469,6 +469,7 @@ DESKS: Dict[str, dict] = {
         "sessions": ["LONDON", "NEW_YORK"],
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "bullish_exit", "bearish_exit", "take_profit", "stop_loss",
         ],
     },
@@ -488,6 +489,7 @@ DESKS: Dict[str, dict] = {
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "bullish_exit", "bearish_exit",
             "take_profit", "stop_loss", "confirmation_turn_plus",
         ],
@@ -507,6 +509,7 @@ DESKS: Dict[str, dict] = {
         "sessions": ["ALL"],
         "alerts": [
             "bullish_plus", "bearish_plus",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "confirmation_turn_plus", "take_profit", "stop_loss",
         ],
     },
@@ -527,6 +530,7 @@ DESKS: Dict[str, dict] = {
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "bullish_exit", "bearish_exit",
             "take_profit", "stop_loss",
         ],
@@ -602,6 +606,7 @@ DESKS: Dict[str, dict] = {
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
+            "bullish_confirmation_plus", "bearish_confirmation_plus",
             "bullish_exit", "bearish_exit",
             "take_profit", "stop_loss",
         ],
