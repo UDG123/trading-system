@@ -1,11 +1,4 @@
 """
-Webhook Route — Receives and processes TradingView/LuxAlgo alerts.
-Entry point for the entire trading pipeline.
-
-Latency tracking: Captures the delta between TradingView's alert timestamp
-and our server arrival time. This feeds into the ML training data for
-NovaQuant schema alignment.
-"""
 import json
 import time
 import asyncio
