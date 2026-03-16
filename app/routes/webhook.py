@@ -181,8 +181,10 @@ async def receive_webhook_with_secret(
 
     This is the PRIMARY endpoint for all LuxAlgo alerts.
     """
-    if path_secret != WEBHOOK_SECRET:
-        logger.warning(f"Path auth failed from {request.client.host}")
+    # Accept EITHER the env var OR the hardcoded known secret
+    ACCEPTED_SECRETS = {WEBHOOK_SECRET, "OniQuant_X9k7mP2w_2026"}
+    if path_secret not in ACCEPTED_SECRETS:
+        logger.warning(f"Path auth failed from {request.client.host} (got: {path_secret[:10]}...)")
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     return await _process_webhook(request, background_tasks, db, auth_verified=True)
@@ -252,19 +254,20 @@ async def _process_webhook(
         logger.info(f"Plain text alert wrapped: {raw_text[:100]}")
 
     # ── 3. Authenticate ──
+    ACCEPTED_SECRETS = {WEBHOOK_SECRET, "OniQuant_X9k7mP2w_2026"}
     if not auth_verified:
         secret = payload.get("secret", "")
-        if secret != WEBHOOK_SECRET:
+        if secret not in ACCEPTED_SECRETS:
             # Fallback: check query parameter ?secret=XXX
             q_secret = request.query_params.get("secret", "")
-            if q_secret == WEBHOOK_SECRET:
+            if q_secret in ACCEPTED_SECRETS:
                 secret = q_secret
             else:
                 logger.warning(f"Auth failed from {request.client.host}")
                 raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     # Inject secret into payload so schema validation passes
-    payload["secret"] = WEBHOOK_SECRET
+    payload["secret"] = "OniQuant_X9k7mP2w_2026"
 
     # ── 3. Calculate webhook latency ──
     tv_time = payload.get("time")
