@@ -78,6 +78,13 @@ class TradingViewAlert(BaseModel):
             "confirmation turn bullish": "confirmation_turn_bullish",
             "confirmation turn bearish": "confirmation_turn_bearish",
             "confirmation turn plus": "confirmation_turn_plus",
+            # Turn variants without "Confirmation" prefix (LuxAlgo v7+)
+            "bullish turn +": "confirmation_turn_bullish",
+            "bearish turn +": "confirmation_turn_bearish",
+            "bullish turn": "confirmation_turn_bullish",
+            "bearish turn": "confirmation_turn_bearish",
+            "bullish confirmation+": "bullish_confirmation_plus",
+            "bearish confirmation+": "bearish_confirmation_plus",
             "take profit": "take_profit",
             "stop loss": "stop_loss",
             "smart trail cross": "smart_trail_cross",
