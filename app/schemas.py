@@ -82,6 +82,11 @@ class TradingViewAlert(BaseModel):
             "stop loss": "stop_loss",
             "smart trail cross": "smart_trail_cross",
             "smart trail crossed": "smart_trail_cross",
+            # Confirmation exit variants (LuxAlgo v7+)
+            "confirmation bullish exit": "bullish_exit",
+            "confirmation bearish exit": "bearish_exit",
+            "confirmation bullish exit signal": "bullish_exit",
+            "confirmation bearish exit signal": "bearish_exit",
             # SMC structure alerts
             "internal bullish bos formed": "smc_bullish_bos",
             "bearish bos formed": "smc_bearish_bos",
@@ -103,8 +108,21 @@ class TradingViewAlert(BaseModel):
         if cleaned in luxalgo_message_map:
             return luxalgo_message_map[cleaned]
 
-        # Otherwise normalize to snake_case
-        return cleaned.replace(" ", "_").replace("-", "_").replace("+", "_plus")
+        # Regex: "TP1 2327.589 Reached" or "SL1 80.932 Reached" → take_profit / stop_loss
+        import re
+        tp_match = re.match(r'^tp\d?\s+[\d.,]+\s+reached$', cleaned)
+        if tp_match:
+            return "take_profit"
+        sl_match = re.match(r'^sl\d?\s+[\d.,]+\s+reached$', cleaned)
+        if sl_match:
+            return "stop_loss"
+        # "Smart Trail X.XX Reached"
+        if cleaned.startswith("smart trail") and "reached" in cleaned:
+            return "smart_trail_cross"
+
+        # Otherwise normalize to snake_case, truncate to 50 chars for DB safety
+        result = cleaned.replace(" ", "_").replace("-", "_").replace("+", "_plus")
+        return result[:50]
 
     @field_validator("symbol")
     @classmethod
