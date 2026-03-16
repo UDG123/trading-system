@@ -81,27 +81,81 @@ async def receive_webhook(
     """
     Primary webhook endpoint for TradingView alerts.
     Pipeline: Receive → Authenticate → Validate → Log → Route → Pipeline
+
+    Accepts:
+      - MSE alerts: JSON body with secret inside
+      - S&O/PAC/OM alerts: JSON body with secret inside OR secret via ?secret= query param
+      - LuxAlgo native JSON: auto-maps field names (ticker→symbol, bartime→time, signal→alert_type)
+      - Plain text: wraps in JSON using query params for metadata
     """
     # ── 0. Capture arrival time immediately ──
     arrival_time = time.time()
 
-    # ── 1. Parse raw body ──
+    # ── 1. Parse raw body — handle JSON and plain text ──
     try:
         raw_body = await request.body()
-        raw_text = raw_body.decode("utf-8")
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        logger.warning(f"Invalid JSON received: {raw_body[:200]}")
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        raw_text = raw_body.decode("utf-8").strip()
     except Exception as e:
-        logger.error(f"Request parse error: {e}")
+        logger.error(f"Request read error: {e}")
         raise HTTPException(status_code=400, detail="Could not read request body")
 
-    # ── 2. Authenticate ──
+    # Try JSON first
+    payload = None
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    # If not JSON, treat as plain text alert message (e.g. LuxAlgo {default} as text)
+    if payload is None:
+        # Extract secret from query param
+        q_secret = request.query_params.get("secret", "")
+        if not raw_text:
+            raise HTTPException(status_code=400, detail="Empty request body")
+        # Wrap plain text into a minimal payload — alert_type is the text itself
+        payload = {
+            "secret": q_secret,
+            "symbol": request.query_params.get("symbol", "UNKNOWN"),
+            "exchange": request.query_params.get("exchange", ""),
+            "timeframe": request.query_params.get("timeframe", "60"),
+            "alert_type": raw_text,
+            "price": 0,
+        }
+        logger.info(f"Plain text alert wrapped: {raw_text[:100]}")
+
+    # ── 1b. Auto-map LuxAlgo native JSON field names ──
+    if isinstance(payload, dict):
+        # LuxAlgo v6+ sends "ticker" instead of "symbol"
+        if "ticker" in payload and "symbol" not in payload:
+            payload["symbol"] = payload.pop("ticker")
+        # LuxAlgo v6.0.2+ sends "bartime" instead of "time"
+        if "bartime" in payload and "time" not in payload:
+            payload["time"] = payload.pop("bartime")
+        # LuxAlgo sends "signal" or "type" instead of "alert_type"
+        if "alert_type" not in payload:
+            for alt_key in ("signal", "type", "message", "condition"):
+                if alt_key in payload:
+                    payload["alert_type"] = payload.pop(alt_key)
+                    break
+        # LuxAlgo/TradingView may send "interval" instead of "timeframe"
+        if "interval" in payload and "timeframe" not in payload:
+            payload["timeframe"] = payload.pop("interval")
+        # LuxAlgo v6.0.3+ sends "bar_color" (1=green, 0=purple, -1=red)
+        # Store as extra context but don't require it
+        if "bar_color" in payload and "mse" not in payload:
+            payload.setdefault("_bar_color", payload.pop("bar_color"))
+
+    # ── 2. Authenticate — check body OR query parameter ──
     secret = payload.get("secret", "")
     if secret != WEBHOOK_SECRET:
-        logger.warning(f"Auth failed from {request.client.host}")
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+        # Fallback: check query parameter ?secret=XXX
+        q_secret = request.query_params.get("secret", "")
+        if q_secret == WEBHOOK_SECRET:
+            payload["secret"] = q_secret  # Inject so schema validation passes
+            secret = q_secret
+        else:
+            logger.warning(f"Auth failed from {request.client.host}")
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     # ── 3. Calculate webhook latency ──
     tv_time = payload.get("time")
