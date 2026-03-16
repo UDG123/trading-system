@@ -35,8 +35,8 @@ class TradingViewAlert(BaseModel):
     # Core signal data
     symbol: str = Field(..., description="Ticker symbol from TradingView")
     exchange: Optional[str] = Field(None, description="Exchange identifier")
-    timeframe: str = Field(..., description="Chart timeframe")
-    alert_type: str = Field(..., description="LuxAlgo alert type")
+    timeframe: str = Field("60", description="Chart timeframe")
+    alert_type: str = Field("unknown", description="LuxAlgo alert type")
     price: float = Field(0, ge=0, description="Current price at alert")
     time: Optional[str] = Field(None, description="Alert timestamp from TV")
 
