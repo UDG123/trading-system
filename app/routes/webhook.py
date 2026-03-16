@@ -232,34 +232,48 @@ async def _handle(
     # Direction
     direction = _direction(alert.alert_type)
 
-    # Log to DB
+    # Log to DB — truncate fields to match DB column limits
     proc_ms = int((time.time() - arrival) * 1000)
-    signal = Signal(
-        received_at=datetime.now(timezone.utc),
-        source="tradingview",
-        raw_payload=raw,
-        symbol=alert.symbol,
-        symbol_normalized=normalized,
-        timeframe=alert.timeframe,
-        alert_type=alert.alert_type,
-        direction=direction,
-        price=alert.price,
-        tp1=alert.tp1,
-        tp2=alert.tp2,
-        sl1=alert.sl1,
-        sl2=alert.sl2,
-        smart_trail=alert.smart_trail,
-        desk_id=desks[0] if len(desks) == 1 else None,
-        desks_matched=desks,
-        is_valid=is_valid,
-        validation_errors=errors if errors else None,
-        status="VALIDATED" if is_valid else "REJECTED",
-        processing_time_ms=proc_ms,
-        webhook_latency_ms=latency_ms,
-    )
-    db.add(signal)
-    db.commit()
-    db.refresh(signal)
+    safe_alert_type = alert.alert_type[:50] if alert.alert_type else "unknown"
+    safe_symbol = alert.symbol[:20] if alert.symbol else "UNKNOWN"
+    safe_normalized = normalized[:20] if normalized else "UNKNOWN"
+    safe_timeframe = alert.timeframe[:10] if alert.timeframe else "60"
+
+    try:
+        signal = Signal(
+            received_at=datetime.now(timezone.utc),
+            source="tradingview",
+            raw_payload=raw[:5000],
+            symbol=safe_symbol,
+            symbol_normalized=safe_normalized,
+            timeframe=safe_timeframe,
+            alert_type=safe_alert_type,
+            direction=direction,
+            price=alert.price,
+            tp1=alert.tp1,
+            tp2=alert.tp2,
+            sl1=alert.sl1,
+            sl2=alert.sl2,
+            smart_trail=alert.smart_trail,
+            desk_id=desks[0] if len(desks) == 1 else None,
+            desks_matched=desks,
+            is_valid=is_valid,
+            validation_errors=errors if errors else None,
+            status="VALIDATED" if is_valid else "REJECTED",
+            processing_time_ms=proc_ms,
+            webhook_latency_ms=latency_ms,
+        )
+        db.add(signal)
+        db.commit()
+        db.refresh(signal)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"DB insert failed: {e}")
+        return SignalResponse(
+            status="error",
+            is_valid=False,
+            message=f"Database error: {str(e)[:200]}",
+        )
 
     lat_str = f"{latency_ms}ms" if latency_ms is not None else "N/A"
 
