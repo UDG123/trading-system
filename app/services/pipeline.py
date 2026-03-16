@@ -186,6 +186,34 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             except Exception as e:
                 logger.warning(f"Live price fetch failed for {signal.symbol_normalized}: {e}")
 
+            # ── 2b. Calculate SL/TP from ATR if missing ──
+            price = signal_data.get("price", 0)
+            atr = enrichment.get("atr")
+            direction = signal_data.get("direction", "LONG")
+            if price > 0 and atr and atr > 0:
+                if not signal_data.get("sl1"):
+                    sl_distance = atr * 1.5  # 1.5x ATR for SL
+                    if direction == "LONG":
+                        signal_data["sl1"] = round(price - sl_distance, 5)
+                    else:
+                        signal_data["sl1"] = round(price + sl_distance, 5)
+                    logger.info(f"Calculated SL from ATR: {signal_data['sl1']} (ATR={atr:.5f})")
+
+                if not signal_data.get("tp1"):
+                    tp_distance = atr * 2.0  # 2x ATR for TP1
+                    if direction == "LONG":
+                        signal_data["tp1"] = round(price + tp_distance, 5)
+                    else:
+                        signal_data["tp1"] = round(price - tp_distance, 5)
+                    logger.info(f"Calculated TP1 from ATR: {signal_data['tp1']}")
+
+                if not signal_data.get("tp2"):
+                    tp2_distance = atr * 3.0  # 3x ATR for TP2
+                    if direction == "LONG":
+                        signal_data["tp2"] = round(price + tp2_distance, 5)
+                    else:
+                        signal_data["tp2"] = round(price - tp2_distance, 5)
+
             # ── 3. ML model scoring ──
             signal.status = "SCORING"
             db.commit()
@@ -286,16 +314,13 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 db.add(trade_record)
                 db.flush()
                 signal._ml_trade_id = trade_record.id
-                zmq_result = await zmq_bridge.send_trade(trade_params, signal.id)
-                if zmq_result.get("status") == "sent":
-                    signal.status = "EXECUTED"
 
-                # ── 10b. MetaApi $1M demo execution (parallel) ──
+                # ── 10. MetaApi PRIMARY execution ──
                 try:
                     from app.services.metaapi_executor import get_executor, is_enabled
                     if is_enabled():
                         ma = get_executor()
-                        await ma.open_trade(
+                        ma_result = await ma.open_trade(
                             trade_id=trade_record.id,
                             symbol=signal_data.get("symbol", ""),
                             direction=signal_data.get("direction", ""),
@@ -305,8 +330,22 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                             desk_capital=desk_capital,
                             comment=f"OQ#{trade_record.id}|{desk_id}",
                         )
+                        if ma_result.get("success"):
+                            signal.status = "EXECUTED"
+                            trade_record.mt5_ticket = int(ma_result.get("positionId", trade_record.mt5_ticket) or trade_record.mt5_ticket)
+                            logger.info(f"MetaApi EXECUTED | #{trade_record.id} | {signal_data.get('symbol')}")
+                        else:
+                            logger.warning(f"MetaApi failed: {ma_result.get('error')} — trade logged but not executed on broker")
+                            signal.status = "DECIDED"
+                    else:
+                        logger.info(f"MetaApi not configured — trade #{trade_record.id} logged in simulator only")
+                        signal.status = "DECIDED"
                 except Exception as e:
-                    logger.debug(f"MetaApi open failed (non-blocking): {e}")
+                    logger.warning(f"MetaApi execution error (non-blocking): {e}")
+                    signal.status = "DECIDED"
+
+                # ── 10b. ZMQ bridge fallback (LOG-ONLY unless VPS_HOST set) ──
+                zmq_result = await zmq_bridge.send_trade(trade_params, signal.id)
 
                 # ── 11. Telegram notification ──
                 await telegram.notify_trade_entry(trade_params, decision)
