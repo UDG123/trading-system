@@ -51,9 +51,10 @@ class SignalValidator:
             "bullish_confirmation_plus", "bearish_confirmation_plus",
             "contrarian_bullish", "contrarian_bearish",
         }
+        # 4. For entry signals, warn if missing SL (pipeline will calculate from ATR)
         if alert.alert_type in entry_types and alert.sl1 is None:
-            errors.append(
-                f"Entry signal '{alert.alert_type}' requires sl1 level"
+            logger.warning(
+                f"Entry signal '{alert.alert_type}' missing sl1 — pipeline will calculate from ATR"
             )
 
         # 5. SL/TP sanity: SL must be on correct side of price
