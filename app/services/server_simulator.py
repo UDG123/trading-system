@@ -529,7 +529,7 @@ def get_provider_stats() -> Dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OPEN TRADE STATUSES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OPEN_STATUSES = ["EXECUTED", "OPEN", "ONIAI_OPEN", "VIRTUAL_OPEN"]
+OPEN_STATUSES = ["EXECUTED", "OPEN", "ONIAI_OPEN", "VIRTUAL_OPEN", "SIM_OPEN"]
 HTTP_TIMEOUT = 8.0
 
 
@@ -944,13 +944,17 @@ class ServerSimulator:
         if not (hit_sl or hit_tp2 or time_expired):
             return
 
+        # Determine prefix based on trade origin
+        is_sim = trade.status == "SIM_OPEN"
+        pfx = "SIM" if is_sim else "SRV"
+
         if hit_tp2:
-            exit_price, reason = tp2, "SRV_TP2_HIT"
+            exit_price, reason = tp2, f"{pfx}_TP2_HIT"
         elif hit_sl:
             exit_price = sl
-            reason = "SRV_TRAILING_SL" if state["tp1_hit"] else "SRV_SL_HIT"
+            reason = f"{pfx}_TRAILING_SL" if state["tp1_hit"] else f"{pfx}_SL_HIT"
         else:
-            exit_price, reason = price, "SRV_TIME_EXIT"
+            exit_price, reason = price, f"{pfx}_TIME_EXIT"
 
         pnl_pips = ((exit_price - entry) if is_long else (entry - exit_price)) / pip_size
         pnl_dollars = pnl_pips * pip_value * (trade.lot_size or 0.1)
@@ -958,7 +962,7 @@ class ServerSimulator:
         await self._close_trade(
             trade, db,
             exit_price=exit_price, pnl_pips=pnl_pips, pnl_dollars=pnl_dollars,
-            reason=reason, status="SRV_CLOSED",
+            reason=reason, status=f"{pfx}_CLOSED",
             mfe_pips=abs(
                 (state["high_water"] - entry) if is_long else (entry - state["low_water"])
             ) / pip_size if pip_size else None,
@@ -1030,7 +1034,7 @@ class ServerSimulator:
         if trade.id in self.trade_state:
             del self.trade_state[trade.id]
 
-        tag = "\U0001f916 OniAI" if "ONIAI" in reason else "\U0001f5a5\ufe0f SIM"
+        tag = "\U0001f916 OniAI" if "ONIAI" in reason else ("\U0001f4ca SIM" if "SIM" in reason else "\U0001f5a5\ufe0f SRV")
         hold_str = ""
         if trade.opened_at:
             hold_min = (trade.closed_at - trade.opened_at).total_seconds() / 60
@@ -1089,9 +1093,17 @@ class ServerSimulator:
 
     async def _force_time_exit(self, trade: Trade, db: Session):
         exit_price = trade.entry_price or 0
+        is_sim = trade.status == "SIM_OPEN"
         is_oniai = trade.status in ("ONIAI_OPEN", "VIRTUAL_OPEN")
-        reason = "ONIAI_TIME_EXIT_NOPRICE" if is_oniai else "SRV_TIME_EXIT_NOPRICE"
-        status = "ONIAI_CLOSED" if is_oniai else "SRV_CLOSED"
+        if is_sim:
+            reason = "SIM_TIME_EXIT_NOPRICE"
+            status = "SIM_CLOSED"
+        elif is_oniai:
+            reason = "ONIAI_TIME_EXIT_NOPRICE"
+            status = "ONIAI_CLOSED"
+        else:
+            reason = "SRV_TIME_EXIT_NOPRICE"
+            status = "SRV_CLOSED"
         elapsed = 0
         if trade.opened_at:
             elapsed = (datetime.now(timezone.utc) - trade.opened_at).total_seconds() / 3600
@@ -1146,6 +1158,7 @@ class ServerSimulator:
                             if is_virtual:
                                 await self._check_virtual_trade(trade, price, db)
                             else:
+                                # SIM_OPEN, EXECUTED, OPEN — all get full trailing/TP1/TP2 logic
                                 await self._check_executed_trade(trade, price, db)
                         else:
                             if self._is_time_expired(trade):
