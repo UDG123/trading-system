@@ -289,7 +289,7 @@ class HardRiskFilter:
                 .filter(
                     Trade.symbol.in_(correlated_symbols),
                     Trade.direction == direction,
-                    Trade.status.in_(["OPEN", "EXECUTED"]),
+                    Trade.status.in_(["OPEN", "EXECUTED", "SIM_OPEN"]),
                 )
                 .count()
             )
