@@ -169,10 +169,6 @@ class ClaudeCTO:
         if firm_risk.get("firm_drawdown_exceeded"):
             reasons.append("Firm-wide daily drawdown exceeded $30,000")
 
-        # Max trades for the day
-        if desk_state.get("max_trades_hit"):
-            reasons.append("Maximum daily trades reached for this desk")
-
         if reasons:
             return {
                 "decision": "SKIP",
