@@ -1,22 +1,28 @@
 """
-Consensus Scoring Engine
-Implements the multi-timeframe consensus scoring system from the architecture.
-Produces a score that determines position sizing: HIGH (7+), MEDIUM (4-6),
-LOW (2-3), or SKIP (below 2).
+Consensus Scoring Engine v5.9 — Institutional Floor Scoring
+Produces a score: HIGH (8+), MEDIUM (5-7), LOW (3-4), SKIP (<3).
+
+Changes from v5.8:
+- Plus signals score +2 (doubled from +1)
+- Kill zone overlap scores +3 (up from +2)
+- HTF conflict scores -4 (up from -3)
+- RSI alignment +2/-2 (up from +1/-1)
+- NEW: ADX trending bonus (+1), ranging penalty (-1)
+- NEW: VIX elevated penalty (-2) for indices/equities
+- NEW: VIX gold bullish bonus (+1) when VIX > 25
+- NEW: DXY headwind penalty (-1) for USD pairs
+- NEW: Multi-analyst agreement bonus (+2)
+- Thresholds raised: HIGH=8, MEDIUM=5, LOW=3 (pre-filtering makes signals higher quality)
 """
 import logging
 from typing import Dict, List, Optional
 
-from app.config import DESKS, SCORE_WEIGHTS, SCORE_THRESHOLDS
+from app.config import DESKS, SCORE_WEIGHTS, SCORE_THRESHOLDS, VIX_REGIMES
 
 logger = logging.getLogger("TradingSystem.Consensus")
 
 
 class ConsensusScorer:
-    """
-    Calculates multi-timeframe consensus score for a signal.
-    Each component adds or subtracts points based on alignment.
-    """
 
     def score(
         self,
@@ -26,46 +32,36 @@ class ConsensusScorer:
         ml_result: Dict,
         recent_signals: Optional[List[Dict]] = None,
     ) -> Dict:
-        """
-        Calculate consensus score. Returns:
-        - total_score: int
-        - tier: HIGH / MEDIUM / LOW / SKIP
-        - size_multiplier: 1.0 / 0.5 / 0.25 / 0.0
-        - breakdown: dict of individual score components
-        """
         desk = DESKS.get(desk_id, {})
         breakdown = {}
         total = 0
 
-        # ── 1. Entry trigger fires (+2) ──
-        # A LuxAlgo confirmation signal is a real, validated entry
+        alert_type = signal_data.get("alert_type", "")
+
+        # ── 1. Entry trigger — differentiate normal vs plus ──
         entry_types = {
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
             "bullish_confirmation_plus", "bearish_confirmation_plus",
             "contrarian_bullish", "contrarian_bearish",
         }
-        if signal_data.get("alert_type") in entry_types:
-            breakdown["entry_trigger"] = 2  # base 2 for any valid entry
-            total += 2
+        if alert_type in entry_types:
+            if "plus" in alert_type:
+                breakdown["entry_trigger"] = SCORE_WEIGHTS.get("entry_trigger_plus", 2)
+            else:
+                breakdown["entry_trigger"] = SCORE_WEIGHTS.get("entry_trigger_normal", 1)
+            total += breakdown["entry_trigger"]
 
-        # ── 1b. Signal has SL and TP (+1 bonus) ──
-        # Signals with defined risk levels are higher quality
+        # ── 1b. LuxAlgo provided SL and TP (+1) ──
         if signal_data.get("sl1") and signal_data.get("tp1"):
-            breakdown["defined_risk"] = 1
-            total += 1
+            breakdown["defined_risk"] = SCORE_WEIGHTS.get("defined_sl_tp", 1)
+            total += breakdown["defined_risk"]
 
-        # ── 2. Bullish+ or Bearish+ signal type (+1) ──
-        if "plus" in signal_data.get("alert_type", ""):
-            breakdown["bullish_bearish_plus"] = SCORE_WEIGHTS["bullish_bearish_plus"]
-            total += breakdown["bullish_bearish_plus"]
-
-        # ── 3. Confirmation Turn+ present (+2) ──
-        if signal_data.get("alert_type") == "confirmation_turn_plus":
-            breakdown["confirmation_turn_plus"] = SCORE_WEIGHTS["confirmation_turn_plus"]
+        # ── 2. Confirmation Turn+ bonus ──
+        if alert_type == "confirmation_turn_plus":
+            breakdown["confirmation_turn_plus"] = SCORE_WEIGHTS.get("confirmation_turn_plus", 2)
             total += breakdown["confirmation_turn_plus"]
 
-        # Check recent signals for confirmation turn on same symbol
         if recent_signals:
             for rs in recent_signals:
                 if (
@@ -73,76 +69,105 @@ class ConsensusScorer:
                     and rs.get("alert_type") == "confirmation_turn_plus"
                     and "confirmation_turn_plus" not in breakdown
                 ):
-                    breakdown["confirmation_turn_plus"] = SCORE_WEIGHTS["confirmation_turn_plus"]
+                    breakdown["confirmation_turn_plus"] = SCORE_WEIGHTS.get("confirmation_turn_plus", 2)
                     total += breakdown["confirmation_turn_plus"]
                     break
 
-        # ── 4. Timeframe alignment scoring ──
-        tf_scores = self._score_timeframe_alignment(
-            signal_data, desk, recent_signals
-        )
+        # ── 3. Timeframe alignment ──
+        tf_scores = self._score_timeframe_alignment(signal_data, desk, recent_signals)
         breakdown.update(tf_scores)
         total += sum(tf_scores.values())
 
-        # ── 5. Kill Zone bonuses ──
+        # ── 4. Kill Zone bonuses ──
         kz_type = enrichment.get("kill_zone_type", "NONE")
         if kz_type == "OVERLAP":
-            breakdown["kill_zone_overlap"] = SCORE_WEIGHTS["kill_zone_overlap"]
+            breakdown["kill_zone_overlap"] = SCORE_WEIGHTS.get("kill_zone_overlap", 3)
             total += breakdown["kill_zone_overlap"]
         elif kz_type in ("LONDON_OPEN", "NY_OPEN"):
-            breakdown["kill_zone_single"] = SCORE_WEIGHTS["kill_zone_single"]
+            breakdown["kill_zone_single"] = SCORE_WEIGHTS.get("kill_zone_single", 1)
             total += breakdown["kill_zone_single"]
 
-        # ── 6. ML classifier confirmation (+1 per timeframe) ──
+        # ── 5. ML classifier confirmation ──
         ml_score = ml_result.get("ml_score", 0.5)
         if ml_score >= 0.65:
-            breakdown["ml_confirm"] = SCORE_WEIGHTS["ml_confirm_per_tf"]
+            breakdown["ml_confirm"] = SCORE_WEIGHTS.get("ml_confirm_per_tf", 1)
             total += breakdown["ml_confirm"]
         if ml_score >= 0.80:
-            # Strong ML confirmation = extra point
-            breakdown["ml_confirm_strong"] = SCORE_WEIGHTS["ml_confirm_per_tf"]
+            breakdown["ml_confirm_strong"] = SCORE_WEIGHTS.get("ml_confirm_per_tf", 1)
             total += breakdown["ml_confirm_strong"]
 
-        # ── 7. Correlation confirmation (+2) ──
-        corr_score = self._check_correlation(
-            signal_data, enrichment, recent_signals
-        )
+        # ── 6. Correlation confirmation ──
+        corr_score = self._check_correlation(signal_data, enrichment, recent_signals)
         if corr_score > 0:
             breakdown["correlation_confirm"] = corr_score
             total += corr_score
 
-        # ── 8. Liquidity sweep detection (+3) ──
+        # ── 7. Liquidity sweep detection ──
         if self._detect_liquidity_sweep(signal_data, enrichment):
-            breakdown["liquidity_sweep"] = SCORE_WEIGHTS["liquidity_sweep"]
+            breakdown["liquidity_sweep"] = SCORE_WEIGHTS.get("liquidity_sweep", 3)
             total += breakdown["liquidity_sweep"]
 
-        # ── 9. Conflicting higher timeframe (-3) ──
-        htf_conflict = self._check_htf_conflict(
-            signal_data, desk, recent_signals
-        )
-        if htf_conflict:
-            breakdown["conflicting_htf"] = SCORE_WEIGHTS["conflicting_htf"]
+        # ── 8. HTF conflict ──
+        if self._check_htf_conflict(signal_data, desk, recent_signals):
+            breakdown["conflicting_htf"] = SCORE_WEIGHTS.get("conflicting_htf", -4)
             total += breakdown["conflicting_htf"]
 
-        # ── 10. RSI divergence bonus ──
+        # ── 9. RSI alignment (v5.9: stronger weights) ──
         rsi_bonus = self._check_rsi_alignment(signal_data, enrichment)
         if rsi_bonus != 0:
             breakdown["rsi_alignment"] = rsi_bonus
             total += rsi_bonus
 
-        # ── Determine tier and size multiplier ──
+        # ── 10. NEW: ADX trend strength ──
+        adx = enrichment.get("adx")
+        if adx is not None:
+            if adx >= 25:
+                breakdown["adx_trending"] = SCORE_WEIGHTS.get("adx_trending", 1)
+                total += breakdown["adx_trending"]
+            elif adx < 20:
+                breakdown["adx_ranging"] = SCORE_WEIGHTS.get("adx_ranging", -1)
+                total += breakdown["adx_ranging"]
+
+        # ── 11. NEW: VIX regime for indices/equities/momentum ──
+        vix_level = 0
+        intermarket = enrichment.get("intermarket", {})
+        vix_data = intermarket.get("VIX", {})
+        if vix_data and vix_data.get("price"):
+            vix_level = float(vix_data["price"])
+
+        if vix_level > VIX_REGIMES.get("ELEVATED", 25):
+            if desk_id in ("DESK5_ALTS", "DESK6_EQUITIES"):
+                breakdown["vix_elevated"] = SCORE_WEIGHTS.get("vix_elevated", -2)
+                total += breakdown["vix_elevated"]
+
+            # Gold gets a bonus when VIX is high (safe-haven)
+            if desk_id == "DESK4_GOLD" and signal_data.get("direction") == "LONG":
+                breakdown["vix_gold_bullish"] = SCORE_WEIGHTS.get("vix_gold_bullish", 1)
+                total += breakdown["vix_gold_bullish"]
+
+        # ── 12. NEW: DXY headwind for USD pairs ──
+        dxy_headwind = self._check_dxy_headwind(signal_data, enrichment)
+        if dxy_headwind:
+            breakdown["dxy_headwind"] = SCORE_WEIGHTS.get("dxy_headwind", -1)
+            total += breakdown["dxy_headwind"]
+
+        # ── 13. NEW: Multi-analyst agreement ──
+        # If another signal on the same symbol from a different TF agrees in direction
+        if recent_signals:
+            agreement = self._check_multi_analyst_agreement(signal_data, desk_id, recent_signals)
+            if agreement:
+                breakdown["multi_analyst_agree"] = SCORE_WEIGHTS.get("multi_analyst_agree", 2)
+                total += breakdown["multi_analyst_agree"]
+
+        # ── Determine tier ──
         if total >= SCORE_THRESHOLDS["HIGH"]:
-            tier = "HIGH"
-            size_mult = 1.0
+            tier, size_mult = "HIGH", 1.0
         elif total >= SCORE_THRESHOLDS["MEDIUM"]:
-            tier = "MEDIUM"
-            size_mult = 0.5
+            tier, size_mult = "MEDIUM", 0.6
         elif total >= SCORE_THRESHOLDS["LOW"]:
-            tier = "LOW"
-            size_mult = 0.25
+            tier, size_mult = "LOW", 0.3
         else:
-            tier = "SKIP"
-            size_mult = 0.0
+            tier, size_mult = "SKIP", 0.0
 
         result = {
             "total_score": total,
@@ -151,6 +176,7 @@ class ConsensusScorer:
             "breakdown": breakdown,
             "desk_id": desk_id,
             "ml_score": ml_score,
+            "vix_level": vix_level,
         }
 
         logger.info(
@@ -161,186 +187,184 @@ class ConsensusScorer:
 
         return result
 
-    def _score_timeframe_alignment(
-        self, signal_data: Dict, desk: Dict, recent_signals: Optional[List]
-    ) -> Dict:
-        """
-        Check if higher timeframes agree with signal direction.
-        +3 for bias TF match, +2 for confirmation TF match.
-        """
+    # ─────────────────────────────────────────────────
+    # HELPER METHODS
+    # ─────────────────────────────────────────────────
+
+    def _score_timeframe_alignment(self, signal_data, desk, recent_signals):
         scores = {}
         direction = signal_data.get("direction")
-        signal_tf = signal_data.get("timeframe", "")
         desk_tfs = desk.get("timeframes", {})
-
         if not recent_signals or not direction:
             return scores
 
-        # Look for matching signals on bias timeframe
         bias_tf = desk_tfs.get("bias", "")
         conf_tf = desk_tfs.get("confirmation", "")
 
         for rs in recent_signals:
             if rs.get("symbol") != signal_data.get("symbol"):
                 continue
-
             rs_dir = rs.get("direction")
             rs_tf = rs.get("timeframe", "")
 
-            # Bias timeframe matches direction
-            if rs_tf == bias_tf and rs_dir == direction:
-                if "bias_match" not in scores:
-                    scores["bias_match"] = SCORE_WEIGHTS["bias_match"]
-
-            # Confirmation timeframe matches
-            if rs_tf == conf_tf and rs_dir == direction:
-                if "setup_match" not in scores:
-                    scores["setup_match"] = SCORE_WEIGHTS["setup_match"]
+            if rs_tf == bias_tf and rs_dir == direction and "bias_match" not in scores:
+                scores["bias_match"] = SCORE_WEIGHTS.get("bias_match", 3)
+            if rs_tf == conf_tf and rs_dir == direction and "setup_match" not in scores:
+                scores["setup_match"] = SCORE_WEIGHTS.get("setup_match", 2)
 
         return scores
 
-    def _check_correlation(
-        self, signal_data: Dict, enrichment: Dict, recent_signals: Optional[List]
-    ) -> int:
-        """
-        Check if correlated assets confirm the signal direction.
-        E.g., EURUSD bullish + DXY falling = confirmation.
-        """
+    def _check_correlation(self, signal_data, enrichment, recent_signals):
         direction = signal_data.get("direction")
         symbol = signal_data.get("symbol", "")
         intermarket = enrichment.get("intermarket", {})
-
         if not direction or not intermarket:
             return 0
 
-        # USD pairs: DXY falling confirms non-USD bullish
-        usd_pairs_bullish_when_dxy_falls = [
-            "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"
-        ]
-        usd_pairs_bullish_when_dxy_rises = [
-            "USDJPY", "USDCHF", "USDCAD"
-        ]
+        usd_long_when_dxy_falls = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"]
+        usd_long_when_dxy_rises = ["USDJPY", "USDCHF", "USDCAD"]
 
         dxy = intermarket.get("DXY")
         if dxy and dxy.get("change_pct"):
             dxy_falling = dxy["change_pct"] < -0.1
             dxy_rising = dxy["change_pct"] > 0.1
+            if symbol in usd_long_when_dxy_falls:
+                if (direction == "LONG" and dxy_falling) or (direction == "SHORT" and dxy_rising):
+                    return SCORE_WEIGHTS.get("correlation_confirm", 2)
+            if symbol in usd_long_when_dxy_rises:
+                if (direction == "LONG" and dxy_rising) or (direction == "SHORT" and dxy_falling):
+                    return SCORE_WEIGHTS.get("correlation_confirm", 2)
 
-            if symbol in usd_pairs_bullish_when_dxy_falls:
-                if direction == "LONG" and dxy_falling:
-                    return SCORE_WEIGHTS["correlation_confirm"]
-                if direction == "SHORT" and dxy_rising:
-                    return SCORE_WEIGHTS["correlation_confirm"]
-
-            if symbol in usd_pairs_bullish_when_dxy_rises:
-                if direction == "LONG" and dxy_rising:
-                    return SCORE_WEIGHTS["correlation_confirm"]
-                if direction == "SHORT" and dxy_falling:
-                    return SCORE_WEIGHTS["correlation_confirm"]
-
-        # Gold: VIX rising + gold bullish = confirmation
         if symbol == "XAUUSD":
             vix = intermarket.get("VIX")
             if vix and vix.get("change_pct"):
                 if direction == "LONG" and vix["change_pct"] > 0.5:
-                    return SCORE_WEIGHTS["correlation_confirm"]
+                    return SCORE_WEIGHTS.get("correlation_confirm", 2)
 
-        # Also check recent signals on correlated pairs
         if recent_signals:
             correlated = self._get_correlated_pairs(symbol)
             for rs in recent_signals:
-                if (
-                    rs.get("symbol") in correlated
-                    and rs.get("direction") == direction
-                ):
-                    return SCORE_WEIGHTS["correlation_confirm"]
+                if rs.get("symbol") in correlated and rs.get("direction") == direction:
+                    return SCORE_WEIGHTS.get("correlation_confirm", 2)
 
         return 0
 
-    def _detect_liquidity_sweep(
-        self, signal_data: Dict, enrichment: Dict
-    ) -> bool:
-        """
-        Detect potential liquidity sweep: sharp spike through a level
-        followed by a reversal signal. Contrarian signals after rapid
-        moves are the primary indicator.
-        """
+    def _detect_liquidity_sweep(self, signal_data, enrichment):
         alert_type = signal_data.get("alert_type", "")
         atr_pct = enrichment.get("atr_pct")
-
-        # Contrarian signal + high ATR suggests liquidity sweep
         if "contrarian" in alert_type and atr_pct and atr_pct > 1.0:
             return True
-
-        # Plus signal in high volatility could be post-sweep
         if "plus" in alert_type and atr_pct and atr_pct > 1.5:
             return True
-
         return False
 
-    def _check_htf_conflict(
-        self, signal_data: Dict, desk: Dict, recent_signals: Optional[List]
-    ) -> bool:
-        """Check if higher timeframe signals conflict with this signal."""
+    def _check_htf_conflict(self, signal_data, desk, recent_signals):
         if not recent_signals:
             return False
-
         direction = signal_data.get("direction")
         symbol = signal_data.get("symbol")
         bias_tf = desk.get("timeframes", {}).get("bias", "")
-
         for rs in recent_signals:
             if (
                 rs.get("symbol") == symbol
                 and rs.get("timeframe") == bias_tf
-                and rs.get("direction") is not None
-                and rs.get("direction") != direction
-                and rs.get("direction") != "EXIT"
+                and rs.get("direction") not in (None, "EXIT", direction)
             ):
                 return True
-
         return False
 
-    def _check_rsi_alignment(
-        self, signal_data: Dict, enrichment: Dict
-    ) -> int:
-        """Bonus/penalty for RSI alignment with signal direction."""
+    def _check_rsi_alignment(self, signal_data, enrichment):
         rsi = enrichment.get("rsi")
         direction = signal_data.get("direction")
-
         if rsi is None or direction is None:
             return 0
-
-        # Bullish from oversold = +1 bonus
+        # v5.9: stronger bonuses and penalties
         if direction == "LONG" and rsi < 30:
-            return 1
-        # Bearish from overbought = +1 bonus
+            return SCORE_WEIGHTS.get("rsi_aligned", 2)
         if direction == "SHORT" and rsi > 70:
-            return 1
-        # Bullish into overbought = -1 penalty
-        if direction == "LONG" and rsi > 80:
-            return -1
-        # Bearish into oversold = -1 penalty
-        if direction == "SHORT" and rsi < 20:
-            return -1
-
+            return SCORE_WEIGHTS.get("rsi_aligned", 2)
+        if direction == "LONG" and rsi > 75:
+            return SCORE_WEIGHTS.get("rsi_counter", -2)
+        if direction == "SHORT" and rsi < 25:
+            return SCORE_WEIGHTS.get("rsi_counter", -2)
         return 0
 
-    def _get_correlated_pairs(self, symbol: str) -> List[str]:
-        """Return list of correlated symbols for cross-confirmation."""
+    def _check_dxy_headwind(self, signal_data, enrichment):
+        """DXY moving against the trade direction for USD pairs."""
+        direction = signal_data.get("direction")
+        symbol = signal_data.get("symbol", "")
+        intermarket = enrichment.get("intermarket", {})
+        dxy = intermarket.get("DXY")
+        if not dxy or not dxy.get("change_pct"):
+            return False
+
+        dxy_change = dxy["change_pct"]
+        usd_long_when_dxy_falls = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"]
+        usd_long_when_dxy_rises = ["USDJPY", "USDCHF", "USDCAD"]
+
+        # Headwind = DXY moving against your trade
+        if symbol in usd_long_when_dxy_falls:
+            if direction == "LONG" and dxy_change > 0.15:
+                return True
+            if direction == "SHORT" and dxy_change < -0.15:
+                return True
+        if symbol in usd_long_when_dxy_rises:
+            if direction == "LONG" and dxy_change < -0.15:
+                return True
+            if direction == "SHORT" and dxy_change > 0.15:
+                return True
+        return False
+
+    def _check_multi_analyst_agreement(self, signal_data, desk_id, recent_signals):
+        """Check if another signal on the same symbol from a different TF agrees."""
+        symbol = signal_data.get("symbol")
+        direction = signal_data.get("direction")
+        signal_tf = signal_data.get("timeframe", "")
+
+        if not recent_signals or not direction:
+            return False
+
+        for rs in recent_signals:
+            if (
+                rs.get("symbol") == symbol
+                and rs.get("direction") == direction
+                and rs.get("timeframe") != signal_tf
+                and rs.get("timeframe")  # must have a different TF
+            ):
+                return True
+        return False
+
+    def _get_correlated_pairs(self, symbol):
         correlation_map = {
             "EURUSD": ["GBPUSD", "NZDUSD"],
             "GBPUSD": ["EURUSD"],
-            "AUDUSD": ["NZDUSD"],
+            "AUDUSD": ["NZDUSD", "AUDCAD"],
             "NZDUSD": ["AUDUSD"],
+            "USDCHF": ["EURUSD"],  # inverse
+            "EURCHF": ["EURUSD", "USDCHF"],
             "USDJPY": ["EURJPY", "GBPJPY"],
-            "EURJPY": ["USDJPY", "GBPJPY"],
+            "EURJPY": ["USDJPY", "GBPJPY", "AUDJPY"],
             "GBPJPY": ["USDJPY", "EURJPY"],
-            "AUDJPY": ["EURJPY"],
-            "US30": ["US100", "NAS100"],
-            "US100": ["US30", "NAS100"],
-            "NAS100": ["US30", "US100"],
-            "BTCUSD": ["ETHUSD"],
-            "ETHUSD": ["BTCUSD"],
+            "AUDJPY": ["EURJPY", "NZDJPY"],
+            "CADJPY": ["EURJPY", "GBPJPY"],
+            "NZDJPY": ["AUDJPY", "CADJPY"],
+            "CHFJPY": ["EURJPY"],
+            "EURGBP": ["EURUSD", "GBPUSD"],
+            "EURAUD": ["EURUSD", "AUDUSD"],
+            "GBPAUD": ["GBPUSD", "AUDUSD"],
+            "GBPCAD": ["GBPUSD", "USDCAD"],
+            "GBPNZD": ["GBPUSD", "NZDUSD"],
+            "EURNZD": ["EURUSD", "NZDUSD"],
+            "AUDCAD": ["AUDUSD", "USDCAD"],
+            "NAS100": ["US30", "BTCUSD"],
+            "US30":   ["NAS100"],
+            "BTCUSD": ["ETHUSD", "NAS100", "SOLUSD"],
+            "ETHUSD": ["BTCUSD", "SOLUSD"],
+            "SOLUSD": ["BTCUSD", "ETHUSD"],
+            "XRPUSD": ["BTCUSD"],
+            "LINKUSD": ["BTCUSD", "ETHUSD"],
+            "XAUUSD": ["XAGUSD"],
+            "XAGUSD": ["XAUUSD"],
+            "WTIUSD": [],
         }
         return correlation_map.get(symbol, [])
