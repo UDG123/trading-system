@@ -24,7 +24,8 @@ from app.services.price_service import PriceService
 from app.models.signal import Signal
 from app.config import (
     DESKS, CAPITAL_PER_ACCOUNT, PORTFOLIO_CAPITAL_PER_DESK,
-    get_pip_info, calculate_lot_size,
+    get_pip_info, calculate_lot_size, get_atr_settings,
+    VIX_REGIMES, DESK_DAILY_HARD_STOP_PCT,
 )
 from app.services.ml_data_logger import MLDataLogger
 
@@ -186,33 +187,82 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             except Exception as e:
                 logger.warning(f"Live price fetch failed for {signal.symbol_normalized}: {e}")
 
-            # ── 2b. Calculate SL/TP from ATR if missing ──
+            # ── 2b. Calculate SL/TP from ATR using desk-specific multipliers ──
             price = signal_data.get("price", 0)
             atr = enrichment.get("atr")
             direction = signal_data.get("direction", "LONG")
+            timeframe = signal_data.get("timeframe", "")
+            symbol = signal_data.get("symbol", "")
+
+            # Get desk+symbol+timeframe specific ATR settings
+            atr_cfg = get_atr_settings(desk_id, symbol, timeframe)
+            sl_mult = atr_cfg.get("sl_mult", 2.0)
+            tp1_mult = atr_cfg.get("tp1_mult", 4.0)
+            tp2_mult = atr_cfg.get("tp2_mult", 6.0)
+
             if price > 0 and atr and atr > 0:
                 if not signal_data.get("sl1"):
-                    sl_distance = atr * 1.5  # 1.5x ATR for SL
+                    sl_distance = atr * sl_mult
                     if direction == "LONG":
                         signal_data["sl1"] = round(price - sl_distance, 5)
                     else:
                         signal_data["sl1"] = round(price + sl_distance, 5)
-                    logger.info(f"Calculated SL from ATR: {signal_data['sl1']} (ATR={atr:.5f})")
+                    logger.info(
+                        f"ATR SL | {desk_id} | {sl_mult}x ATR({atr:.5f}) = "
+                        f"{signal_data['sl1']} (R:R target 1:{tp1_mult/sl_mult:.1f})"
+                    )
 
                 if not signal_data.get("tp1"):
-                    tp_distance = atr * 2.0  # 2x ATR for TP1
+                    tp_distance = atr * tp1_mult
                     if direction == "LONG":
                         signal_data["tp1"] = round(price + tp_distance, 5)
                     else:
                         signal_data["tp1"] = round(price - tp_distance, 5)
-                    logger.info(f"Calculated TP1 from ATR: {signal_data['tp1']}")
+                    logger.info(f"ATR TP1 | {desk_id} | {tp1_mult}x ATR = {signal_data['tp1']}")
 
                 if not signal_data.get("tp2"):
-                    tp2_distance = atr * 3.0  # 3x ATR for TP2
+                    tp2_distance = atr * tp2_mult
                     if direction == "LONG":
                         signal_data["tp2"] = round(price + tp2_distance, 5)
                     else:
                         signal_data["tp2"] = round(price - tp2_distance, 5)
+
+                # ── R:R floor check — reject if below minimum ──
+                min_rr = atr_cfg.get("min_rr", 1.5)
+                entry = price
+                sl = signal_data.get("sl1", 0)
+                tp = signal_data.get("tp1", 0)
+                if sl and tp and entry:
+                    sl_dist = abs(entry - sl)
+                    tp_dist = abs(tp - entry)
+                    actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
+                    if actual_rr < min_rr and sl_dist > 0:
+                        logger.warning(
+                            f"R:R {actual_rr:.2f} below minimum {min_rr} for {desk_id} — "
+                            f"adjusting TP1 to meet floor"
+                        )
+                        # Adjust TP to meet minimum R:R
+                        required_tp_dist = sl_dist * min_rr
+                        if direction == "LONG":
+                            signal_data["tp1"] = round(entry + required_tp_dist, 5)
+                        else:
+                            signal_data["tp1"] = round(entry - required_tp_dist, 5)
+
+            # ── 2c. VIX regime check — halt momentum/equity desks if VIX too high ──
+            vix_halt = DESKS.get(desk_id, {}).get("vix_halt_above")
+            if vix_halt:
+                vix_data = enrichment.get("intermarket", {}).get("VIX", {})
+                vix_price = float(vix_data.get("price", 0)) if vix_data else 0
+                if vix_price > vix_halt:
+                    signal.status = "REJECTED"
+                    signal.validation_errors = [f"VIX {vix_price:.1f} > halt threshold {vix_halt}"]
+                    db.commit()
+                    results[desk_id] = {
+                        "decision": "SKIP", "approved": False,
+                        "rejection_reason": f"VIX halt: {vix_price:.1f} > {vix_halt}",
+                    }
+                    logger.warning(f"VIX HALT | {desk_id} | VIX={vix_price:.1f} > {vix_halt}")
+                    continue
 
             # ── 3. ML model scoring ──
             signal.status = "SCORING"
