@@ -69,6 +69,7 @@ class MLScorer:
             # ── Market context features ──
             "rsi": enrichment.get("rsi", 50.0) or 50.0,
             "rsi_extreme": self._rsi_extreme_score(enrichment.get("rsi")),
+            "adx": enrichment.get("adx", 20.0) or 20.0,
             "atr_pct": enrichment.get("atr_pct", 0.5) or 0.5,
             "spread": enrichment.get("spread", 0) or 0,
             "volume": enrichment.get("volume", 0) or 0,
@@ -161,6 +162,15 @@ class MLScorer:
             score -= 0.05  # high vol = wider stops, less predictable
         if features["regime_low_vol"]:
             score -= 0.03  # low vol = less opportunity
+
+        # ADX trend strength
+        adx = features.get("adx", 20.0)
+        if adx >= 30:
+            score += 0.06  # strong trend = higher probability
+        elif adx >= 25:
+            score += 0.03  # moderate trend
+        elif adx < 18:
+            score -= 0.04  # ranging market = lower probability
 
         # Contrarian signals are inherently riskier
         if features["is_contrarian"]:
