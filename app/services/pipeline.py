@@ -1,7 +1,11 @@
 """
-Signal Processing Pipeline
-Orchestrates the full Phase 2 pipeline for validated signals:
-Enrichment → ML Scoring → Consensus Scoring → Claude CTO → Risk Filter
+Signal Processing Pipeline — SIMULATION MODE
+Orchestrates the full pipeline for validated signals:
+Enrichment → ML Scoring → Consensus Scoring → Claude CTO → Simulated Trade
+
+ALL CTO-approved signals become simulated trades in the database.
+No execution limits, no max_open blocking. Every approved signal is
+tracked and broadcast to Telegram for profitability analysis.
 
 Runs asynchronously after webhook logs the validated signal.
 """
@@ -18,7 +22,6 @@ from app.services.ml_scorer import MLScorer
 from app.services.consensus_scorer import ConsensusScorer
 from app.services.claude_cto import ClaudeCTO
 from app.services.risk_filter import HardRiskFilter
-from app.services.zmq_bridge import ZMQBridge
 from app.services.telegram_bot import TelegramBot
 from app.services.price_service import PriceService
 from app.models.signal import Signal
@@ -37,14 +40,13 @@ _ml_scorer: MLScorer = None
 _consensus: ConsensusScorer = None
 _cto: ClaudeCTO = None
 _risk_filter: HardRiskFilter = None
-_zmq_bridge: ZMQBridge = None
 _telegram: TelegramBot = None
 _price_service: PriceService = None
 
 
 def _get_services():
     """Lazy-initialize shared service instances."""
-    global _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _zmq_bridge, _telegram, _price_service
+    global _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _telegram, _price_service
     if _enricher is None:
         _enricher = TwelveDataEnricher()
     if _ml_scorer is None:
@@ -55,13 +57,11 @@ def _get_services():
         _cto = ClaudeCTO()
     if _risk_filter is None:
         _risk_filter = HardRiskFilter()
-    if _zmq_bridge is None:
-        _zmq_bridge = ZMQBridge()
     if _telegram is None:
         _telegram = TelegramBot()
     if _price_service is None:
         _price_service = PriceService()
-    return _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _zmq_bridge, _telegram, _price_service
+    return _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _telegram, _price_service
 
 
 async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = None) -> Dict:
@@ -88,7 +88,7 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
     Returns pipeline result dict.
     """
     pipeline_start = time.time()
-    enricher, ml_scorer, consensus_scorer, cto, risk_filter, zmq_bridge, telegram, price_service = _get_services()
+    enricher, ml_scorer, consensus_scorer, cto, risk_filter, telegram, price_service = _get_services()
 
     # ── 1. Load signal ──
     signal = db.query(Signal).filter(Signal.id == signal_id).first()
@@ -301,48 +301,80 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             signal.claude_decision = decision["decision"]
             signal.claude_reasoning = decision.get("reasoning", "")
 
-            # ── 8. Hard risk filter ──
-            approved, rejection_reason, trade_params = risk_filter.validate_trade(
-                decision, signal_data, desk_state, desk_id, db=db,
-            )
+            # ── 8. Risk flags (advisory only — does NOT block trades) ──
+            risk_flags = []
+            session_ok, session_msg = risk_filter._check_session(desk_id, DESKS.get(desk_id, {}))
+            if not session_ok:
+                risk_flags.append(f"session: {session_msg}")
 
-            # Attach enrichment context for notifications
-            if trade_params:
-                trade_params["trend"] = enrichment.get("trend", "UNKNOWN")
-                trade_params["rsi"] = enrichment.get("rsi")
-                trade_params["rsi_zone"] = enrichment.get("rsi_zone", "UNKNOWN")
-                trade_params["volatility_regime"] = enrichment.get("volatility_regime", "UNKNOWN")
-                trade_params["ema50"] = enrichment.get("ema50")
-                trade_params["ema200"] = enrichment.get("ema200")
-                trade_params["session"] = enrichment.get("active_session", "UNKNOWN")
+            if db:
+                corr_ok, corr_msg = risk_filter._check_correlation(
+                    db, signal_data.get("symbol"), signal_data.get("direction")
+                )
+                if not corr_ok:
+                    risk_flags.append(f"correlation: {corr_msg}")
+
+            # Build trade params for ALL CTO-approved signals
+            desk = DESKS.get(desk_id, {})
+            risk_pct = desk.get("risk_pct", 1.0)
+            size_mult = decision.get("size_multiplier", 1.0)
+            desk_modifier = desk_state.get("size_modifier", 1.0)
+            effective_risk_pct = min(risk_pct * size_mult * desk_modifier, risk_pct)
+            risk_dollars = CAPITAL_PER_ACCOUNT * (effective_risk_pct / 100)
+
+            trade_params = {
+                "desk_id": desk_id,
+                "symbol": signal_data.get("symbol"),
+                "direction": signal_data.get("direction"),
+                "price": signal_data.get("price"),
+                "timeframe": signal_data.get("timeframe"),
+                "alert_type": signal_data.get("alert_type"),
+                "risk_pct": round(effective_risk_pct, 4),
+                "risk_dollars": round(risk_dollars, 2),
+                "stop_loss": signal_data.get("sl1"),
+                "take_profit_1": signal_data.get("tp1"),
+                "take_profit_2": signal_data.get("tp2"),
+                "trailing_stop_pips": desk.get("trailing_stop_pips"),
+                "max_hold_hours": desk.get("max_hold_hours"),
+                "size_multiplier": round(size_mult * desk_modifier, 4),
+                "claude_decision": decision.get("decision"),
+                "claude_reasoning": decision.get("reasoning"),
+                "confidence": decision.get("confidence"),
+                "trend": enrichment.get("trend", "UNKNOWN"),
+                "rsi": enrichment.get("rsi"),
+                "rsi_zone": enrichment.get("rsi_zone", "UNKNOWN"),
+                "volatility_regime": enrichment.get("volatility_regime", "UNKNOWN"),
+                "ema50": enrichment.get("ema50"),
+                "ema200": enrichment.get("ema200"),
+                "session": enrichment.get("active_session", "UNKNOWN"),
+                "risk_flags": risk_flags,
+            }
 
             # Desk index for unique ticket generation
             desk_idx = desks.index(desk_id) if desk_id in desks else 0
 
-            if approved:
-                signal.status = "DECIDED"
+            if decision.get("decision") in ("EXECUTE", "REDUCE"):
+                # ── 9. CTO APPROVED → Create simulated trade ──
+                signal.status = "SIM_OPEN"
                 signal.position_size_pct = trade_params.get("risk_pct")
                 signal.desk_id = desk_id
 
-                # ── 9. Create Trade record for server-side sim ──
                 from app.models.trade import Trade as TradeModel
 
-                # Calculate lot size based on desk method
+                # Calculate lot size
                 entry_price = signal_data.get("price", 0)
                 sl_price = signal_data.get("sl1", 0)
                 pip_size, pip_value = get_pip_info(signal_data.get("symbol", ""))
                 sl_pips = abs(float(entry_price) - float(sl_price)) / pip_size if entry_price and sl_price and pip_size else 0
 
                 desk_capital = PORTFOLIO_CAPITAL_PER_DESK.get(desk_id, CAPITAL_PER_ACCOUNT)
-                risk_pct = trade_params.get("risk_pct", 1.0)
                 lot_size = calculate_lot_size(
                     desk_id=desk_id,
                     symbol=signal_data.get("symbol", ""),
-                    risk_pct=risk_pct,
+                    risk_pct=effective_risk_pct,
                     sl_pips=sl_pips,
                     account_capital=desk_capital,
                 )
-                risk_dollars = desk_capital * (risk_pct / 100)
 
                 # Unique ticket: 900000 + signal_id * 10 + desk_index
                 trade_record = TradeModel(
@@ -353,165 +385,39 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     mt5_ticket=900000 + signal.id * 10 + desk_idx,
                     entry_price=entry_price,
                     lot_size=lot_size,
-                    risk_pct=risk_pct,
+                    risk_pct=effective_risk_pct,
                     risk_dollars=risk_dollars,
                     stop_loss=signal_data.get("sl1"),
                     take_profit_1=signal_data.get("tp1"),
                     take_profit_2=signal_data.get("tp2"),
-                    status="EXECUTED",
+                    status="SIM_OPEN",
                     opened_at=datetime.now(timezone.utc),
+                    close_reason="|".join(risk_flags) if risk_flags else None,
                 )
                 db.add(trade_record)
                 db.flush()
                 signal._ml_trade_id = trade_record.id
 
-                # ── 10. MetaApi PRIMARY execution ──
-                try:
-                    from app.services.metaapi_executor import get_executor, is_enabled
-                    if is_enabled():
-                        ma = get_executor()
-                        ma_result = await ma.open_trade(
-                            trade_id=trade_record.id,
-                            symbol=signal_data.get("symbol", ""),
-                            direction=signal_data.get("direction", ""),
-                            lot_size=lot_size,
-                            stop_loss=signal_data.get("sl1"),
-                            take_profit=signal_data.get("tp1"),
-                            desk_capital=desk_capital,
-                            comment=f"OQ#{trade_record.id}|{desk_id}",
-                        )
-                        if ma_result.get("success"):
-                            signal.status = "EXECUTED"
-                            trade_record.mt5_ticket = int(ma_result.get("positionId", trade_record.mt5_ticket) or trade_record.mt5_ticket)
-                            logger.info(f"MetaApi EXECUTED | #{trade_record.id} | {signal_data.get('symbol')}")
-                        else:
-                            logger.warning(f"MetaApi failed: {ma_result.get('error')} — trade logged but not executed on broker")
-                            signal.status = "DECIDED"
-                    else:
-                        logger.info(f"MetaApi not configured — trade #{trade_record.id} logged in simulator only")
-                        signal.status = "DECIDED"
-                except Exception as e:
-                    logger.warning(f"MetaApi execution error (non-blocking): {e}")
-                    signal.status = "DECIDED"
-
-                # ── 10b. ZMQ bridge fallback (LOG-ONLY unless VPS_HOST set) ──
-                zmq_result = await zmq_bridge.send_trade(trade_params, signal.id)
-
-                # ── 11. Telegram notification ──
+                # ── 10. Telegram notification ──
                 await telegram.notify_trade_entry(trade_params, decision)
 
-            elif decision.get("decision") in ["EXECUTE", "REDUCE"]:
-                # ── CTO approved but risk filter blocked ──
-                # Track as OniAI virtual trade for accuracy data
-                signal.status = "ONIAI_VIRTUAL"
-                signal.position_size_pct = decision.get("size_multiplier", 1.0)
-                signal.desk_id = desk_id
-                signal.claude_reasoning = (
-                    f"[OniAI] CTO approved but blocked: {rejection_reason}. "
-                    f"Original: {decision.get('reasoning', '')}"
-                )
-
-                # Build virtual trade params for notification + tracking
-                desk = DESKS.get(desk_id, {})
-                virtual_params = {
-                    "desk_id": desk_id,
-                    "symbol": signal_data.get("symbol"),
-                    "direction": signal_data.get("direction"),
-                    "price": signal_data.get("price"),
-                    "timeframe": signal_data.get("timeframe"),
-                    "alert_type": signal_data.get("alert_type"),
-                    "risk_pct": desk.get("risk_pct", 1.0),
-                    "risk_dollars": CAPITAL_PER_ACCOUNT * (desk.get("risk_pct", 1.0) / 100),
-                    "stop_loss": signal_data.get("sl1"),
-                    "take_profit_1": signal_data.get("tp1"),
-                    "take_profit_2": signal_data.get("tp2"),
-                    "trailing_stop_pips": desk.get("trailing_stop_pips"),
-                    "max_hold_hours": desk.get("max_hold_hours"),
-                    "size_multiplier": decision.get("size_multiplier", 1.0),
-                    "claude_decision": decision.get("decision"),
-                    "claude_reasoning": decision.get("reasoning"),
-                    "confidence": decision.get("confidence"),
-                    "is_oniai": True,
-                    "block_reason": rejection_reason,
-                    "trend": enrichment.get("trend", "UNKNOWN"),
-                    "rsi": enrichment.get("rsi"),
-                    "rsi_zone": enrichment.get("rsi_zone", "UNKNOWN"),
-                    "volatility_regime": enrichment.get("volatility_regime", "UNKNOWN"),
-                    "session": enrichment.get("active_session", "UNKNOWN"),
-                }
-
-                # Send OniAI Telegram notification
-                await telegram.notify_oniai_signal(virtual_params, decision)
-
-                # Create a virtual Trade record for tracking
-                from app.models.trade import Trade as TradeModel
-
-                # Use the blocking desk's profile for lot sizing (apples to apples)
-                oni_entry = signal_data.get("price", 0)
-                oni_sl = signal_data.get("sl1", 0)
-                oni_pip_size, oni_pip_value = get_pip_info(signal_data.get("symbol", ""))
-                oni_sl_pips = abs(float(oni_entry) - float(oni_sl)) / oni_pip_size if oni_entry and oni_sl and oni_pip_size else 0
-                oni_risk_pct = desk.get("risk_pct", 1.0)
-                oni_lot = calculate_lot_size(
-                    desk_id=desk_id,
-                    symbol=signal_data.get("symbol", ""),
-                    risk_pct=oni_risk_pct,
-                    sl_pips=oni_sl_pips,
-                    account_capital=CAPITAL_PER_ACCOUNT,
-                    profile="SRV_100",  # same profile as blocking desk
-                )
-
-                virtual_trade = TradeModel(
-                    signal_id=signal.id,
-                    desk_id=desk_id,
-                    symbol=signal_data.get("symbol"),
-                    direction=signal_data.get("direction"),
-                    mt5_ticket=800000 + signal.id * 10 + desk_idx,
-                    entry_price=signal_data.get("price", 0),
-                    lot_size=oni_lot,
-                    risk_pct=oni_risk_pct,
-                    risk_dollars=CAPITAL_PER_ACCOUNT * (oni_risk_pct / 100),
-                    stop_loss=signal_data.get("sl1"),
-                    take_profit_1=signal_data.get("tp1"),
-                    take_profit_2=signal_data.get("tp2"),
-                    status="ONIAI_OPEN",
-                    opened_at=datetime.now(timezone.utc),
-                    close_reason=f"ONIAI|{rejection_reason}",
-                )
-                db.add(virtual_trade)
-                db.flush()
-                signal._ml_trade_id = virtual_trade.id
-
-                # ── MetaApi $1M demo execution (ONIAI trades too) ──
-                try:
-                    from app.services.metaapi_executor import get_executor, is_enabled
-                    if is_enabled():
-                        ma = get_executor()
-                        await ma.open_trade(
-                            trade_id=virtual_trade.id,
-                            symbol=signal_data.get("symbol", ""),
-                            direction=signal_data.get("direction", ""),
-                            lot_size=oni_lot,
-                            stop_loss=signal_data.get("sl1"),
-                            take_profit=signal_data.get("tp1"),
-                            desk_capital=CAPITAL_PER_ACCOUNT,
-                            comment=f"OQ#{virtual_trade.id}|{desk_id}|ONIAI",
-                        )
-                except Exception as e:
-                    logger.debug(f"MetaApi ONIAI open failed (non-blocking): {e}")
-
                 logger.info(
-                    f"OniAI VIRTUAL | {desk_id} | {signal_data.get('symbol')} "
-                    f"{signal_data.get('direction')} | Blocked: {rejection_reason}"
+                    f"SIM TRADE #{trade_record.id} | {desk_id} | "
+                    f"{signal_data.get('symbol')} {signal_data.get('direction')} | "
+                    f"Lot: {lot_size} | Risk: ${risk_dollars:.2f} | "
+                    f"Flags: {risk_flags if risk_flags else 'none'}"
                 )
+
+                approved = True
+                rejection_reason = None
 
             else:
+                # ── CTO said SKIP ──
                 signal.status = "REJECTED"
                 signal.claude_decision = "SKIP"
-                signal.claude_reasoning = (
-                    f"Risk filter: {rejection_reason}. "
-                    f"Original CTO: {decision.get('reasoning', '')}"
-                )
+                signal.claude_reasoning = decision.get("reasoning", "")
+                approved = False
+                rejection_reason = decision.get("reasoning", "CTO SKIP")
 
             db.commit()
 
