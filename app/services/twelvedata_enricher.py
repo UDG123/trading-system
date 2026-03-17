@@ -75,7 +75,7 @@ class TwelveDataEnricher:
 
         try:
             # Fetch technical indicators in parallel
-            atr_data, rsi_data, quote_data, ema50_data, ema200_data = await self._fetch_parallel(
+            atr_data, rsi_data, adx_data, quote_data, ema50_data, ema200_data = await self._fetch_parallel(
                 td_symbol, td_interval
             )
 
@@ -96,6 +96,13 @@ class TwelveDataEnricher:
             else:
                 enrichment["rsi"] = None
                 enrichment["rsi_zone"] = "UNKNOWN"
+
+            # ── ADX (Average Directional Index) — trend strength ──
+            if adx_data and ("adx" in adx_data or "value" in adx_data):
+                adx_val = float(adx_data.get("adx") or adx_data.get("value"))
+                enrichment["adx"] = round(adx_val, 2)
+            else:
+                enrichment["adx"] = None
 
             # ── EMA 50 & 200 — trend detection ──
             ema50 = None
@@ -148,7 +155,7 @@ class TwelveDataEnricher:
 
         logger.info(
             f"Enriched {symbol}: ATR={enrichment.get('atr')} "
-            f"RSI={enrichment.get('rsi')} "
+            f"RSI={enrichment.get('rsi')} ADX={enrichment.get('adx')} "
             f"Trend={enrichment.get('trend')} "
             f"Regime={enrichment.get('volatility_regime')} "
             f"Session={enrichment.get('active_session')}"
@@ -157,9 +164,10 @@ class TwelveDataEnricher:
         return enrichment
 
     async def _fetch_parallel(self, symbol: str, interval: str):
-        """Fetch ATR, RSI, EMA, and quote data."""
+        """Fetch ATR, RSI, ADX, EMA, and quote data."""
         atr_data = None
         rsi_data = None
+        adx_data = None
         quote_data = None
         ema50_data = None
         ema200_data = None
@@ -202,6 +210,22 @@ class TwelveDataEnricher:
 
         try:
             resp = await self.client.get(
+                f"{BASE_URL}/adx",
+                params={
+                    "symbol": symbol, "interval": interval,
+                    "time_period": 14, "apikey": self.api_key,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if "values" in data and data["values"]:
+                    adx_data = data["values"][0]
+                    logger.debug(f"ADX raw keys: {list(adx_data.keys())}")
+        except Exception as e:
+            logger.debug(f"ADX fetch failed: {e}")
+
+        try:
+            resp = await self.client.get(
                 f"{BASE_URL}/ema",
                 params={
                     "symbol": symbol, "interval": interval,
@@ -240,7 +264,7 @@ class TwelveDataEnricher:
         except Exception as e:
             logger.debug(f"Quote fetch failed: {e}")
 
-        return atr_data, rsi_data, quote_data, ema50_data, ema200_data
+        return atr_data, rsi_data, adx_data, quote_data, ema50_data, ema200_data
 
     async def _fetch_intermarket(self) -> Dict:
         """Fetch intermarket snapshot: DXY, VIX, bonds, oil."""
@@ -394,6 +418,7 @@ class TwelveDataEnricher:
             "atr_pct": None,
             "rsi": None,
             "rsi_zone": "UNKNOWN",
+            "adx": None,
             "ema50": None,
             "ema200": None,
             "trend": "UNKNOWN",
@@ -427,6 +452,10 @@ class TwelveDataEnricher:
             enrichment["atr_pct"] = round((float(atr) / price) * 100, 4) if atr and price else None
             enrichment["rsi"] = round(float(rsi), 2) if rsi is not None else None
             enrichment["rsi_zone"] = self._classify_rsi(float(rsi)) if rsi is not None else "UNKNOWN"
+
+            # ADX from MSE
+            adx = mse_data.get("adx")
+            enrichment["adx"] = round(float(adx), 2) if adx is not None else None
 
             # EMA values aren't raw numbers from MSE — but we have the classification
             ema_slope = mse_data.get("ema50_slope", "flat")
