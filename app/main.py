@@ -1,6 +1,6 @@
 """
-Autonomous Institutional Trading System - Phase 1
-FastAPI Webhook Receiver for LuxAlgo TradingView Alerts
+OniQuant v5.9 — Zero-Key Oracle
+FastAPI + Redis Stream Ingestor + LocalBroker (Virtual) + apscheduler
 """
 import os
 import logging
@@ -8,8 +8,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
+
+# Install uvloop as the default event loop policy (before any loop creation)
+uvloop.install()
 
 from app.database import engine, Base, check_db_connection, SessionLocal
 from app.routes.webhook import router as webhook_router
@@ -17,7 +22,6 @@ from app.routes.health import router as health_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.telegram import router as telegram_router
 from app.routes.control import router as control_router
-from app.routes.trade_queue import router as trade_queue_router
 from app.routes.ml_export import router as ml_export_router
 
 logging.basicConfig(
@@ -29,10 +33,11 @@ logger = logging.getLogger("TradingSystem")
 
 # Background task handles
 _report_task = None
-_simulator_task = None
 _diag_task = None
 _diag_service = None
 _price_service = None
+_redis_pool = None
+_scheduler = None
 
 
 async def _auto_report_scheduler():
@@ -122,11 +127,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("PostgreSQL connection FAILED - system degraded")
 
-    logger.info("Phase 1 Webhook Receiver ONLINE")
+    # ── Redis connection pool (shared across webhook ingestor) ──
+    import redis.asyncio as aioredis
+    from app.config import REDIS_URL
+    from app.routes.webhook import set_redis
+
+    global _redis_pool
+    _redis_pool = aioredis.from_url(
+        REDIS_URL,
+        decode_responses=False,
+        max_connections=20,
+    )
+    set_redis(_redis_pool)
+    # Verify connectivity
+    try:
+        await _redis_pool.ping()
+        logger.info(f"Redis connected: {REDIS_URL.split('@')[-1] if '@' in REDIS_URL else REDIS_URL}")
+    except Exception as e:
+        logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
+
+    logger.info("OniQuant v5.9 Ingestor ONLINE (uvloop + orjson + Redis Streams)")
     logger.info("=" * 60)
 
     # Start background report scheduler
-    global _report_task, _simulator_task
+    global _report_task
     _report_task = asyncio.create_task(_auto_report_scheduler())
     logger.info("Report scheduler started (daily 21:30 UTC, weekly Fri, monthly last day)")
 
@@ -136,12 +160,6 @@ async def lifespan(app: FastAPI):
     _price_service = PriceService()
     logger.info("PriceService ready (on-demand only, no continuous feed)")
 
-    # Start 4-provider JIT simulator (Binance WS + TD + FH + FMP)
-    from app.services.server_simulator import ServerSimulator
-    _sim = ServerSimulator()
-    _simulator_task = asyncio.create_task(_sim.run())
-    logger.info("4-Provider JIT simulator started (Binance WS + TD + FH + FMP)")
-
     # Start diagnostics service
     from app.services.diagnostics import DiagnosticsService
     global _diag_task, _diag_service
@@ -149,26 +167,49 @@ async def lifespan(app: FastAPI):
     _diag_task = asyncio.create_task(_diag_service.run())
     logger.info("Diagnostics service started (checking every 5 min)")
 
+    # ── Performance Digest Scheduler (5:00 PM Toronto Time daily) ──
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from app.worker import send_daily_digest
+
+    global _scheduler
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(
+        send_daily_digest,
+        trigger=CronTrigger(hour=17, minute=0, timezone="America/Toronto"),
+        args=[SessionLocal],
+        id="daily_pnl_digest",
+        name="Daily PnL Digest (5 PM Toronto)",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    logger.info("APScheduler started: Daily PnL Digest at 17:00 America/Toronto")
+
     yield
 
     # Cancel background tasks
     if _report_task:
         _report_task.cancel()
-    if _simulator_task:
-        _simulator_task.cancel()
-        await _sim.stop()
     if _price_service:
         await _price_service.close()
     if _diag_task:
         _diag_task.cancel()
         await _diag_service.stop()
+    # Shutdown scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        logger.info("APScheduler stopped")
+    # Close Redis pool
+    if _redis_pool:
+        await _redis_pool.aclose()
+        logger.info("Redis pool closed")
     logger.info("Trading system shutting down")
 
 
 app = FastAPI(
-    title="Autonomous Institutional Trading System",
-    description="Phase 1: Webhook Receiver & Signal Logger",
-    version="1.0.0",
+    title="OniQuant v5.9 — Zero-Key Oracle",
+    description="Redis Stream Ingestor + LocalBroker + MCP Verification Gates",
+    version="5.9.0",
     lifespan=lifespan,
 )
 
@@ -186,5 +227,47 @@ app.include_router(webhook_router, prefix="/api", tags=["Webhook"])
 app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
-app.include_router(trade_queue_router, prefix="/api", tags=["Trade Queue"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])
+
+
+# ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───
+
+@app.get("/test-alpha-strike", response_class=ORJSONResponse)
+async def test_alpha_strike():
+    """
+    Fire a synthetic signal through TelegramService + OracleBridge
+    to verify dual-routing (Portfolio + Desk) and the Master Mix layout.
+    Hit from mobile browser: https://<railway-url>/test-alpha-strike
+    """
+    from app.services.telegram_notifications import TelegramService
+    from app.services.oracle_bridge import OracleBridge
+
+    # Synthetic signal data for layout verification
+    test_data = {
+        "desk_id": "DESK4_GOLD",
+        "ml_score": 3,
+        "hurst": 0.68,
+        "direction": "LONG",
+        "price": 2652.40,
+        "rvol": 1.8,
+        "vwap_z": 0.7,
+        "ml_conf": 75,
+        "sl": 2638.50,
+        "tp1": 2680.00,
+        "tv_link": "https://www.tradingview.com/chart/?symbol=XAUUSD",
+    }
+
+    # Format with Master Mix layout
+    message = OracleBridge.format_strike_message(test_data)
+
+    # Dual-route to Portfolio + DESK4_GOLD
+    tg = TelegramService()
+    await tg.broadcast_signal("DESK4_GOLD", message)
+
+    return {
+        "status": "sent",
+        "layout": "Master Mix (OracleBridge)",
+        "routing": ["TG_PORTFOLIO", "TG_DESK4_GOLD"],
+        "message_preview": message[:200],
+        "test_data": test_data,
+    }

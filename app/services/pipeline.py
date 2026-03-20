@@ -1,11 +1,11 @@
 """
-Signal Processing Pipeline — SIMULATION MODE
+Signal Processing Pipeline — Alpaca Paper Trading Mode
 Orchestrates the full pipeline for validated signals:
-Enrichment → ML Scoring → Consensus Scoring → Claude CTO → Simulated Trade
+Enrichment → Hurst Filter → ML Scoring → Consensus Scoring → Claude CTO → Alpaca Execution
 
-ALL CTO-approved signals become simulated trades in the database.
-No execution limits, no max_open blocking. Every approved signal is
-tracked and broadcast to Telegram for profitability analysis.
+ALL CTO-approved signals are executed via Alpaca Paper Trading.
+HOLD signals are parked in pending memory for re-evaluation.
+CHOP signals (Hurst < 0.45) are skipped automatically.
 
 Runs asynchronously after webhook logs the validated signal.
 """
@@ -24,6 +24,8 @@ from app.services.claude_cto import ClaudeCTO
 from app.services.risk_filter import HardRiskFilter
 from app.services.telegram_bot import TelegramBot
 from app.services.price_service import PriceService
+from app.services.paper_executor import PaperExecutor
+from app.services.pending_memory import PendingSignalManager
 from app.models.signal import Signal
 from app.config import (
     DESKS, CAPITAL_PER_ACCOUNT, PORTFOLIO_CAPITAL_PER_DESK,
@@ -42,11 +44,18 @@ _cto: ClaudeCTO = None
 _risk_filter: HardRiskFilter = None
 _telegram: TelegramBot = None
 _price_service: PriceService = None
+_paper_executor: PaperExecutor = None
+_pending_memory: PendingSignalManager = None
+
+# Hurst exponent thresholds
+HURST_CHOP_THRESHOLD = 0.52    # Below this → skip (Chop Zone — 69.5% win rate target)
+HURST_TREND_THRESHOLD = 0.55   # Above this → +2 consensus bonus
 
 
 def _get_services():
     """Lazy-initialize shared service instances."""
     global _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _telegram, _price_service
+    global _paper_executor, _pending_memory
     if _enricher is None:
         _enricher = TwelveDataEnricher()
     if _ml_scorer is None:
@@ -61,7 +70,12 @@ def _get_services():
         _telegram = TelegramBot()
     if _price_service is None:
         _price_service = PriceService()
-    return _enricher, _ml_scorer, _consensus, _cto, _risk_filter, _telegram, _price_service
+    if _paper_executor is None:
+        _paper_executor = PaperExecutor()
+    if _pending_memory is None:
+        _pending_memory = PendingSignalManager()
+    return (_enricher, _ml_scorer, _consensus, _cto, _risk_filter,
+            _telegram, _price_service, _paper_executor, _pending_memory)
 
 
 async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = None) -> Dict:
@@ -88,7 +102,8 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
     Returns pipeline result dict.
     """
     pipeline_start = time.time()
-    enricher, ml_scorer, consensus_scorer, cto, risk_filter, telegram, price_service = _get_services()
+    (enricher, ml_scorer, consensus_scorer, cto, risk_filter,
+     telegram, price_service, paper_executor, pending_memory) = _get_services()
 
     # ── 1. Load signal ──
     signal = db.query(Signal).filter(Signal.id == signal_id).first()
@@ -264,7 +279,27 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     logger.warning(f"VIX HALT | {desk_id} | VIX={vix_price:.1f} > {vix_halt}")
                     continue
 
-            # ── 3. ML model scoring ──
+            # ── 3a. Hurst exponent filter — skip choppy markets ──
+            hurst = enrichment.get("hurst_exponent")
+            if hurst is not None and hurst < HURST_CHOP_THRESHOLD:
+                signal.status = "SKIPPED_CHOP"
+                db.commit()
+                await telegram._send_to_system(
+                    f"🌊 <b>CHOP FILTER</b> | {signal.symbol_normalized} "
+                    f"| H={hurst:.3f} < {HURST_CHOP_THRESHOLD} "
+                    f"| {desk_id} — signal skipped (mean-reverting market)"
+                )
+                logger.info(
+                    f"HURST CHOP | {desk_id} | {signal.symbol_normalized} "
+                    f"H={hurst:.3f} — skipping (threshold {HURST_CHOP_THRESHOLD})"
+                )
+                results[desk_id] = {
+                    "decision": "SKIP", "approved": False,
+                    "rejection_reason": f"Hurst chop filter: H={hurst:.3f} < {HURST_CHOP_THRESHOLD}",
+                }
+                continue
+
+            # ── 3b. ML model scoring ──
             signal.status = "SCORING"
             db.commit()
 
@@ -283,6 +318,16 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             consensus = consensus_scorer.score(
                 signal_data, enrichment, desk_id, ml_result, recent_signals
             )
+
+            # ── 5b. Hurst trend bonus — boost consensus in trending markets ──
+            if hurst is not None and hurst > HURST_TREND_THRESHOLD:
+                consensus["total_score"] += 2
+                consensus.setdefault("components", {})["hurst_trend_bonus"] = 2
+                logger.info(
+                    f"HURST BONUS | {desk_id} | H={hurst:.3f} > {HURST_TREND_THRESHOLD} "
+                    f"→ +2 consensus (now {consensus['total_score']})"
+                )
+
             signal.consensus_score = consensus["total_score"]
 
             # ── 6. Get desk state and firm risk ──
@@ -354,8 +399,8 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             desk_idx = desks.index(desk_id) if desk_id in desks else 0
 
             if decision.get("decision") in ("EXECUTE", "REDUCE"):
-                # ── 9. CTO APPROVED → Create simulated trade ──
-                signal.status = "SIM_OPEN"
+                # ── 9. CTO APPROVED → Execute via Alpaca Paper Trading ──
+                signal.status = "EXECUTING"
                 signal.position_size_pct = trade_params.get("risk_pct")
                 signal.desk_id = desk_id
 
@@ -376,6 +421,20 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     account_capital=desk_capital,
                 )
 
+                # ── 9a. Submit to Alpaca Paper Trading ──
+                alpaca_result = await paper_executor.execute(
+                    symbol=signal_data.get("symbol", ""),
+                    direction=signal_data.get("direction", "LONG"),
+                    qty=lot_size,
+                    desk_id=desk_id,
+                    signal_id=signal.id,
+                    entry_price=entry_price,
+                )
+
+                alpaca_order_id = alpaca_result.get("order_id", "")
+                alpaca_status = alpaca_result.get("status", "unknown")
+
+                # ── 9b. Create trade record ──
                 # Unique ticket: 900000 + signal_id * 10 + desk_index
                 trade_record = TradeModel(
                     signal_id=signal.id,
@@ -390,26 +449,49 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     stop_loss=signal_data.get("sl1"),
                     take_profit_1=signal_data.get("tp1"),
                     take_profit_2=signal_data.get("tp2"),
-                    status="SIM_OPEN",
+                    status="ALPACA_OPEN",
                     opened_at=datetime.now(timezone.utc),
                     close_reason="|".join(risk_flags) if risk_flags else None,
                 )
                 db.add(trade_record)
                 db.flush()
                 signal._ml_trade_id = trade_record.id
+                signal.status = "ALPACA_OPEN"
 
                 # ── 10. Telegram notification ──
+                trade_params["alpaca_order_id"] = alpaca_order_id
+                trade_params["alpaca_status"] = alpaca_status
                 await telegram.notify_trade_entry(trade_params, decision)
 
                 logger.info(
-                    f"SIM TRADE #{trade_record.id} | {desk_id} | "
+                    f"ALPACA TRADE #{trade_record.id} | {desk_id} | "
                     f"{signal_data.get('symbol')} {signal_data.get('direction')} | "
                     f"Lot: {lot_size} | Risk: ${risk_dollars:.2f} | "
+                    f"Alpaca: {alpaca_status} ({alpaca_order_id}) | "
                     f"Flags: {risk_flags if risk_flags else 'none'}"
                 )
 
                 approved = True
                 rejection_reason = None
+
+            elif decision.get("decision") == "HOLD":
+                # ── CTO said HOLD → Park in pending memory ──
+                pending_memory.park_signal(
+                    db=db,
+                    signal=signal,
+                    reason=decision.get("reasoning", "CTO HOLD"),
+                )
+                await telegram._send_to_system(
+                    f"🅿️ <b>PARKED</b> | {signal.symbol_normalized} "
+                    f"| {desk_id} | CTO: HOLD\n"
+                    f"<i>{(decision.get('reasoning') or '')[:200]}</i>"
+                )
+                logger.info(
+                    f"HOLD → PARKED | {desk_id} | {signal.symbol_normalized} | "
+                    f"Reason: {decision.get('reasoning', '')[:100]}"
+                )
+                approved = False
+                rejection_reason = f"CTO HOLD — parked in pending memory"
 
             else:
                 # ── CTO said SKIP ──
@@ -425,7 +507,7 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             try:
                 from app.services.ml_data_logger import MLDataLogger
                 _ml_logger = MLDataLogger()
-                _ml_logger.log_signal(
+                ml_log_id = _ml_logger.log_signal(
                     db=db,
                     signal_id=signal.id,
                     signal_data=signal_data,
@@ -438,6 +520,17 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     trade_params=trade_params if approved else {},
                     desk_state=desk_state,
                 )
+
+                # ── Write alpha metadata to ML log ──
+                from app.models.ml_trade_log import MLTradeLog
+                ml_record = db.query(MLTradeLog).filter(MLTradeLog.id == ml_log_id).first()
+                if ml_record:
+                    ml_record.hurst_exponent = enrichment.get("hurst_exponent")
+                    ml_record.rvol_multiplier = enrichment.get("mse_rvol")
+                    ml_record.vwap_z_score = enrichment.get("vwap_z_score")
+                    if decision.get("decision") == "HOLD":
+                        ml_record.pending_wait_time_mins = 0.0  # just parked
+
                 db.commit()
             except Exception as e:
                 logger.debug(f"ML data logging failed: {e}")

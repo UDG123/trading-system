@@ -138,45 +138,14 @@ class DiagnosticsService:
         return issues
 
     async def _check_price_providers(self) -> List[str]:
-        """Check price provider health from 4-provider JIT simulator stats."""
+        """Check price provider API key availability."""
         issues = []
-        try:
-            from app.services.server_simulator import get_provider_stats
-            stats = get_provider_stats()
-
-            for name in ["twelvedata", "finnhub", "fmp", "kraken_ws"]:
-                s = stats.get(name, {})
-                success = s.get("success", 0)
-                fail = s.get("fail", 0)
-                state = s.get("state", "CLOSED")
-                total = success + fail
-
-                if state == "OPEN":
-                    issues.append(f"🔴 {name} circuit OPEN (tripped)")
-
-                if total == 0:
-                    continue
-
-                fail_rate = fail / total if total > 0 else 0
-
-                if fail_rate > 0.5 and total > 10:
-                    issues.append(
-                        f"🟡 {name}: {fail_rate*100:.0f}% failure rate ({fail}/{total})"
-                    )
-
-                if fail_rate > 0.9 and total > 20:
-                    issues.append(
-                        f"🔴 {name} DOWN: {fail_rate*100:.0f}% failures"
-                    )
-
-            # TD daily budget warning
-            td_throttle = stats.get("td_throttle", {})
-            daily = td_throttle.get("daily_credits", 0)
-            if daily > 600:
-                issues.append(f"🟡 TwelveData daily budget: {daily}/800 credits used")
-
-        except Exception as e:
-            logger.debug(f"Price provider check failed: {e}")
+        if not os.getenv("TWELVEDATA_API_KEY"):
+            issues.append("🔴 TWELVEDATA_API_KEY not set")
+        if not os.getenv("FINNHUB_API_KEY"):
+            issues.append("🔴 FINNHUB_API_KEY not set")
+        if not os.getenv("FMP_API_KEY"):
+            issues.append("🔴 FMP_API_KEY not set")
         return issues
 
     def _check_api_keys(self) -> List[str]:
@@ -461,14 +430,12 @@ class DiagnosticsService:
                     Signal.received_at >= today,
                 ).scalar()
 
-                # Price provider stats (4-provider JIT)
-                from app.services.server_simulator import get_provider_stats
-                pstats = get_provider_stats()
-                td_ok = pstats.get("twelvedata", {}).get("success", 0) > 0
-                fh_ok = pstats.get("finnhub", {}).get("success", 0) > 0
-                fmp_ok = pstats.get("fmp", {}).get("success", 0) > 0
-                ws_ok = pstats.get("kraken_ws", {}).get("state", "") != "OPEN"
-                active_providers = sum([td_ok, fh_ok, fmp_ok, ws_ok])
+                # Provider key availability
+                active_providers = sum([
+                    bool(os.getenv("TWELVEDATA_API_KEY")),
+                    bool(os.getenv("FINNHUB_API_KEY")),
+                    bool(os.getenv("FMP_API_KEY")),
+                ])
 
                 # Error count
                 total_errors = sum(self.error_counts.values())
@@ -481,7 +448,7 @@ class DiagnosticsService:
             text = (
                 f"{status_emoji} <b>SYSTEM HEALTH</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📡 Price Providers   {active_providers}/4 active\n"
+                f"📡 Price Providers   {active_providers}/3 configured\n"
                 f"📊 Open Trades       {open_srv} SRV · {open_oniai} OniAI\n"
                 f"🔄 Closed Today      {closed_today}\n"
                 f"📥 Signals Today     {signals_today}\n"

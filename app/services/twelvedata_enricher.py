@@ -1,13 +1,14 @@
 """
 TwelveData Enrichment Service
 Fetches market context for each signal: ATR, RSI, volume profile,
-volatility regime, session detection, and intermarket data.
+volatility regime, session detection, Hurst exponent, and intermarket data.
 """
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import httpx
+import numpy as np
 
 from app.config import TWELVEDATA_API_KEY
 
@@ -153,12 +154,18 @@ class TwelveDataEnricher:
         # ── Intermarket snapshot ──
         enrichment["intermarket"] = await self._fetch_intermarket()
 
+        # ── Hurst exponent — market character ──
+        enrichment["hurst_exponent"] = await self._fetch_and_calc_hurst(
+            td_symbol, td_interval
+        )
+
         logger.info(
             f"Enriched {symbol}: ATR={enrichment.get('atr')} "
             f"RSI={enrichment.get('rsi')} ADX={enrichment.get('adx')} "
             f"Trend={enrichment.get('trend')} "
             f"Regime={enrichment.get('volatility_regime')} "
-            f"Session={enrichment.get('active_session')}"
+            f"Session={enrichment.get('active_session')} "
+            f"Hurst={enrichment.get('hurst_exponent')}"
         )
 
         return enrichment
@@ -288,6 +295,106 @@ class TwelveDataEnricher:
                 result[name] = None
 
         return result
+
+    @staticmethod
+    def calculate_hurst(series: List[float]) -> Optional[float]:
+        """
+        Calculate the Hurst exponent using Rescaled Range (R/S) analysis.
+
+        Interpretation:
+          H < 0.5  → Mean-reverting (choppy/ranging market)
+          H ≈ 0.5  → Random walk (no memory)
+          H > 0.5  → Trending (persistent momentum)
+
+        Requires at least 20 data points for a meaningful estimate.
+        Returns None if input is insufficient or invalid.
+        """
+        if not series or len(series) < 20:
+            return None
+
+        prices = np.array(series, dtype=np.float64)
+        prices = prices[np.isfinite(prices)]
+        if len(prices) < 20:
+            return None
+
+        # Compute on log-returns (standard quant practice)
+        # This measures persistence of *returns*, not price levels
+        ts = np.diff(np.log(prices[prices > 0]))
+        if len(ts) < 20:
+            return None
+
+        # Use sub-series of increasing size to compute R/S at each scale
+        min_window = 10
+        max_window = len(ts)
+
+        # Generate window sizes (powers of 2 up to max, plus intermediates)
+        window_sizes = []
+        size = min_window
+        while size <= max_window // 2:
+            window_sizes.append(size)
+            size = int(size * 1.5)
+        if not window_sizes:
+            return None
+
+        rs_values = []
+        ns_values = []
+
+        for n in window_sizes:
+            # Split into non-overlapping sub-series of length n
+            num_subseries = len(ts) // n
+            if num_subseries == 0:
+                continue
+
+            rs_list = []
+            for i in range(num_subseries):
+                subseries = ts[i * n : (i + 1) * n]
+                mean = np.mean(subseries)
+                deviations = subseries - mean
+                cumulative = np.cumsum(deviations)
+                r = np.max(cumulative) - np.min(cumulative)
+                s = np.std(subseries, ddof=1)
+                if s > 0:
+                    rs_list.append(r / s)
+
+            if rs_list:
+                rs_values.append(np.mean(rs_list))
+                ns_values.append(n)
+
+        if len(ns_values) < 2:
+            return None
+
+        # Linear regression of log(R/S) vs log(n) → slope is Hurst exponent
+        log_n = np.log(ns_values)
+        log_rs = np.log(rs_values)
+
+        # Least squares: H = slope of best-fit line
+        coeffs = np.polyfit(log_n, log_rs, 1)
+        hurst = float(coeffs[0])
+
+        # Clamp to valid range [0, 1]
+        return round(max(0.0, min(1.0, hurst)), 4)
+
+    async def _fetch_and_calc_hurst(self, symbol: str, interval: str) -> Optional[float]:
+        """Fetch recent close prices from TwelveData and compute Hurst exponent."""
+        try:
+            resp = await self.client.get(
+                f"{BASE_URL}/time_series",
+                params={
+                    "symbol": symbol,
+                    "interval": interval,
+                    "outputsize": 100,
+                    "apikey": self.api_key,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                values = data.get("values", [])
+                if values:
+                    closes = [float(v["close"]) for v in reversed(values) if v.get("close")]
+                    return self.calculate_hurst(closes)
+        except Exception as e:
+            logger.debug(f"Hurst calculation failed: {e}")
+        return None
 
     def _classify_rsi(self, rsi: float) -> str:
         """Classify RSI into trading zones."""
@@ -431,6 +538,7 @@ class TwelveDataEnricher:
             "is_kill_zone": self._is_kill_zone(),
             "kill_zone_type": self._kill_zone_type(),
             "intermarket": {},
+            "hurst_exponent": None,
         }
 
     async def enrich_from_mse(self, symbol: str, mse_data: Dict, price: float) -> Dict:

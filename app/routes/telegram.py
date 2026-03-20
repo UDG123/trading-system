@@ -15,14 +15,12 @@ from app.config import (
     TELEGRAM_PORTFOLIO_CHAT, TELEGRAM_SYSTEM_CHAT, DESKS,
 )
 from app.services.telegram_bot import TelegramBot
-from app.services.zmq_bridge import ZMQBridge
 
 logger = logging.getLogger("TradingSystem.TelegramRoute")
 router = APIRouter()
 
 # Shared service instances
 _telegram: TelegramBot = None
-_zmq: ZMQBridge = None
 
 # Authorized chat IDs (all desk channels + portfolio + private)
 AUTHORIZED_CHATS = set()
@@ -76,13 +74,6 @@ def _get_telegram():
     return _telegram
 
 
-def _get_zmq():
-    global _zmq
-    if _zmq is None:
-        _zmq = ZMQBridge()
-    return _zmq
-
-
 @router.post("/telegram")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     """Receives updates from Telegram Bot API webhook."""
@@ -112,7 +103,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         return {"ok": True}
 
     telegram = _get_telegram()
-    zmq_bridge = _get_zmq()
 
     # Parse command (strip @botname if present)
     parts = text.split()
@@ -129,7 +119,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
         elif command == "/kill":
             scope = _resolve_desk(args[0]) if args else "ALL"
-            await _handle_kill(telegram, zmq_bridge, db, scope, "Telegram")
+            await _handle_kill(telegram, db, scope, "Telegram")
 
         elif command == "/pause" and args:
             desk_id = _resolve_desk(args[0])
@@ -163,9 +153,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
         elif command == "/health":
             await _handle_health(telegram)
-
-        elif command == "/metaapi":
-            await _handle_metaapi(telegram)
 
         elif command == "/help":
             await _handle_help(telegram, chat_id)
@@ -297,15 +284,13 @@ async def _handle_desk(telegram: TelegramBot, db: Session, desk_id: str):
 
 
 async def _handle_kill(
-    telegram: TelegramBot, zmq_bridge: ZMQBridge,
+    telegram: TelegramBot,
     db: Session, scope: str, triggered_by: str
 ):
     """Execute kill switch."""
     from app.models.desk_state import DeskState
 
     await telegram.alert_kill_switch(scope, triggered_by)
-
-    result = await zmq_bridge.send_kill_switch(scope)
 
     if scope == "ALL":
         desks = db.query(DeskState).all()
@@ -495,32 +480,6 @@ async def _handle_health(telegram: TelegramBot):
     ])
     checks.append(f"{'🟢' if keys_ok else '🔴'} API Keys")
 
-    # Price providers (4-provider JIT: Binance WS + TD + FH + FMP)
-    try:
-        from app.services.server_simulator import get_provider_stats
-        stats = get_provider_stats()
-        td_ok = stats.get("twelvedata", {}).get("success", 0) > 0
-        fh_ok = stats.get("finnhub", {}).get("success", 0) > 0
-        fmp_ok = stats.get("fmp", {}).get("success", 0) > 0
-        ws_ok = stats.get("kraken_ws", {}).get("state", "") != "OPEN"
-        active = sum([td_ok, fh_ok, fmp_ok, ws_ok])
-        checks.append(
-            f"{'🟢' if ws_ok else '🔴'} Kraken WS  "
-            f"{'🟢' if td_ok else '🔴'} TD  "
-            f"{'🟢' if fh_ok else '🔴'} FH  "
-            f"{'🟢' if fmp_ok else '🔴'} FMP  ({active}/4)"
-        )
-    except:
-        checks.append("🟡 Prices (unknown)")
-
-    # Server sim
-    try:
-        from app.main import _simulator_task
-        running = _simulator_task and not _simulator_task.done()
-        checks.append(f"{'🟢' if running else '🔴'} Server Simulator")
-    except:
-        checks.append("🟡 Server Simulator (unknown)")
-
     # Diagnostics
     try:
         from app.main import _diag_task
@@ -539,57 +498,12 @@ async def _handle_health(telegram: TelegramBot):
 
 
 async def _handle_providers(telegram: TelegramBot):
-    """Show price provider health stats — 4-provider asset-class router."""
+    """Show price provider health stats."""
     import os
-    from app.services.server_simulator import get_provider_stats
-
-    stats = get_provider_stats()
 
     text = (
-        "📡 <b>PRICE PROVIDERS (4-Provider JIT)</b>\n"
+        "📡 <b>PRICE PROVIDERS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-
-    # Provider details with roles
-    providers = [
-        ("kraken_ws", "Kraken WS", "Crypto streaming (+ CoinCap backup)"),
-        ("twelvedata", "TwelveData", "Forex + metals"),
-        ("finnhub", "Finnhub", "US stocks"),
-        ("fmp", "FMP", "Indices + commodities"),
-    ]
-
-    for name, label, role in providers:
-        s = stats.get(name, {})
-        success = s.get("success", 0)
-        fail = s.get("fail", 0)
-        state = s.get("state", "CLOSED")
-        total = success + fail
-
-        if state == "OPEN":
-            emoji = "🔴"
-            rate = "CIRCUIT OPEN"
-        elif total == 0:
-            emoji = "⚪"
-            rate = "No requests"
-        else:
-            pct = success / total * 100
-            emoji = "🟢" if pct > 90 else ("🟡" if pct > 50 else "🔴")
-            rate = f"{pct:.0f}%"
-
-        extra = ""
-        batches = s.get("batch_calls", 0)
-        if batches:
-            extra = f" · {batches}b"
-
-        text += f"{emoji} <b>{label}</b> · {role}\n"
-        text += f"    {success}✅ {fail}❌ · {rate}{extra}\n"
-
-    # TD throttle status
-    td_throttle = stats.get("td_throttle", {})
-    credits_60s = td_throttle.get("credits_60s", 0)
-    daily = td_throttle.get("daily_credits", 0)
-    text += (
-        f"\n⏱ <b>TD Throttle:</b> {credits_60s}/8 credits (60s) · {daily}/800 daily\n"
     )
 
     # API key status
@@ -598,83 +512,11 @@ async def _handle_providers(telegram: TelegramBot):
     fmp_key = "✅" if os.getenv("FMP_API_KEY") else "❌"
 
     text += (
-        f"\n<b>API Keys:</b>\n"
-        f"Binance WS ✅ (no key needed)\n"
-        f"TwelveData {td_key} (8/min batched)\n"
-        f"Finnhub {fh_key} (60/min individual)\n"
-        f"FMP {fmp_key} (250/day batched)\n"
+        f"<b>API Keys:</b>\n"
+        f"TwelveData {td_key}\n"
+        f"Finnhub {fh_key}\n"
+        f"FMP {fmp_key}\n"
     )
-
-    await telegram._send_to_system(text)
-
-
-async def _handle_metaapi(telegram: TelegramBot):
-    """Show MetaApi $1M demo account status."""
-    from app.services.metaapi_executor import get_executor, is_enabled
-
-    if not is_enabled():
-        text = (
-            "🔌 <b>METAAPI STATUS</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "❌ <b>Not configured</b>\n\n"
-            "To enable MetaApi $1M demo execution:\n"
-            "1. Sign up at metaapi.cloud (free tier)\n"
-            "2. Add your broker demo account\n"
-            "3. Add to Railway variables:\n"
-            "   • <code>METAAPI_TOKEN</code>\n"
-            "   • <code>METAAPI_ACCOUNT_ID</code>\n"
-            "   • <code>METAAPI_REGION</code> (default: new-york)\n"
-        )
-        await telegram._send_to_system(text)
-        return
-
-    ma = get_executor()
-    info = await ma.get_account_info()
-    positions = await ma.get_positions()
-
-    if "error" in info:
-        text = (
-            "🔌 <b>METAAPI STATUS</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ API Error: {info['error']}\n"
-        )
-        await telegram._send_to_system(text)
-        return
-
-    balance = info.get("balance", 0)
-    equity = info.get("equity", 0)
-    margin = info.get("margin", 0)
-    free_margin = info.get("freeMargin", 0)
-    pnl = equity - balance
-    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-    leverage = info.get("leverage", 0)
-    broker = info.get("server", "Unknown")
-
-    text = (
-        "🔌 <b>METAAPI $1M DEMO</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏦 Broker: {broker}\n"
-        f"⚖️ Leverage: 1:{leverage}\n\n"
-        f"💰 Balance:     ${balance:,.2f}\n"
-        f"📊 Equity:      ${equity:,.2f}\n"
-        f"{pnl_emoji} Floating PnL: ${pnl:+,.2f}\n"
-        f"🔒 Margin:      ${margin:,.2f}\n"
-        f"💵 Free Margin: ${free_margin:,.2f}\n\n"
-        f"📌 Open positions: {len(positions)}\n"
-    )
-
-    if positions:
-        text += "\n"
-        for pos in positions[:10]:
-            sym = pos.get("symbol", "?")
-            ptype = pos.get("type", "")
-            vol = pos.get("volume", 0)
-            profit = pos.get("profit", 0)
-            p_emoji = "🟢" if profit >= 0 else "🔴"
-            direction = "BUY" if "BUY" in ptype.upper() else "SELL"
-            text += f"  {p_emoji} {sym} {direction} {vol} → ${profit:+.2f}\n"
-        if len(positions) > 10:
-            text += f"  ... +{len(positions) - 10} more\n"
 
     await telegram._send_to_system(text)
 
@@ -689,7 +531,6 @@ async def _handle_help(telegram: TelegramBot, chat_id: str):
         "/desk scalper — Single desk\n"
         "/desks — List all desks\n"
         "/providers — Price feed health\n"
-        "/metaapi — $1M demo account status\n"
         "/health — Quick system check\n"
         "/diag — Full diagnostic report\n"
         "/mlstats — ML training data stats\n\n"

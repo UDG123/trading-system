@@ -2,7 +2,7 @@
 Pydantic Schemas - Request/Response validation for webhook alerts.
 """
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -152,6 +152,19 @@ class SignalResponse(BaseModel):
     is_valid: bool = False
     validation_errors: Optional[List[str]] = None
     message: str = ""
+    ttl_expiry: Optional[datetime] = None
+
+
+class MLTradeLogSchema(BaseModel):
+    """Schema for ML trade log entries with alpha metadata fields."""
+    signal_id: Optional[int] = None
+    symbol: str
+    direction: str
+    desk_id: str
+    hurst_exponent: Optional[float] = Field(None, description="Market character: 0=mean-reverting, 0.5=random, 1=trending")
+    rvol_multiplier: Optional[float] = Field(None, description="Relative volume at signal time")
+    vwap_z_score: Optional[float] = Field(None, description="Standard deviations from VWAP")
+    pending_wait_time_mins: Optional[float] = Field(None, description="Minutes parked in pending memory before fill")
 
 
 class HealthResponse(BaseModel):
