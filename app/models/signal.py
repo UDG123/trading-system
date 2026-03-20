@@ -50,12 +50,16 @@ class Signal(Base):
 
     # ── Processing status ──
     status = Column(
-        String(20),
+        String(30),
         default="RECEIVED",
         nullable=False,
         index=True,
     )
     # RECEIVED → VALIDATED → ENRICHED → SCORED → DECIDED → EXECUTED → REJECTED
+    # Additional: PENDING_CONDITIONS (parked awaiting market conditions)
+
+    # ── Pending Memory Engine ──
+    ttl_expiry = Column(DateTime(timezone=True), nullable=True)  # auto-cancel if not filled by this time
 
     # ── ML scoring (Phase 2) ──
     ml_score = Column(Float, nullable=True)

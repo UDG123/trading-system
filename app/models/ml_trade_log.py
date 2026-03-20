@@ -100,6 +100,12 @@ class MLTradeLog(Base):
     webhook_latency_ms = Column(Integer, nullable=True)    # TV alert → server arrival
     rationale = Column(JSON, nullable=True, default=dict)  # structured CTO reasoning (JSONB)
 
+    # ── Alpha Metadata (Precision Metrics) ──
+    hurst_exponent = Column(Float, nullable=True)          # market character: trending vs choppy (0-1)
+    rvol_multiplier = Column(Float, nullable=True)         # relative volume at signal time
+    vwap_z_score = Column(Float, nullable=True)            # std deviations from VWAP (equities)
+    pending_wait_time_mins = Column(Float, nullable=True)  # time parked in pending memory before fill
+
     __table_args__ = (
         Index("ix_ml_log_symbol_date", "symbol", "created_at"),
         Index("ix_ml_log_desk_date", "desk_id", "created_at"),
