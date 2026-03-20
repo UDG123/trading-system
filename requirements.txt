@@ -9,3 +9,6 @@ scikit-learn==1.5.2
 numpy==1.26.4
 alpaca-py==0.33.1
 websockets==13.1
+orjson==3.10.12
+redis[hiredis]==5.2.1
+uvloop==0.21.0

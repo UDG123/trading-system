@@ -1,6 +1,6 @@
 """
-Autonomous Institutional Trading System - Phase 1
-FastAPI Webhook Receiver for LuxAlgo TradingView Alerts
+OniQuant v5.9 — Autonomous Institutional Trading System
+FastAPI + Redis Stream Ingestor + Alpaca Paper Execution
 """
 import os
 import logging
@@ -8,8 +8,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Install uvloop as the default event loop policy (before any loop creation)
+uvloop.install()
 
 from app.database import engine, Base, check_db_connection, SessionLocal
 from app.routes.webhook import router as webhook_router
@@ -31,6 +35,7 @@ _report_task = None
 _diag_task = None
 _diag_service = None
 _price_service = None
+_redis_pool = None
 
 
 async def _auto_report_scheduler():
@@ -120,7 +125,26 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("PostgreSQL connection FAILED - system degraded")
 
-    logger.info("Phase 1 Webhook Receiver ONLINE")
+    # ── Redis connection pool (shared across webhook ingestor) ──
+    import redis.asyncio as aioredis
+    from app.config import REDIS_URL
+    from app.routes.webhook import set_redis
+
+    global _redis_pool
+    _redis_pool = aioredis.from_url(
+        REDIS_URL,
+        decode_responses=False,
+        max_connections=20,
+    )
+    set_redis(_redis_pool)
+    # Verify connectivity
+    try:
+        await _redis_pool.ping()
+        logger.info(f"Redis connected: {REDIS_URL.split('@')[-1] if '@' in REDIS_URL else REDIS_URL}")
+    except Exception as e:
+        logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
+
+    logger.info("OniQuant v5.9 Ingestor ONLINE (uvloop + orjson + Redis Streams)")
     logger.info("=" * 60)
 
     # Start background report scheduler
@@ -151,6 +175,10 @@ async def lifespan(app: FastAPI):
     if _diag_task:
         _diag_task.cancel()
         await _diag_service.stop()
+    # Close Redis pool
+    if _redis_pool:
+        await _redis_pool.aclose()
+        logger.info("Redis pool closed")
     logger.info("Trading system shutting down")
 
 
