@@ -48,7 +48,7 @@ _paper_executor: PaperExecutor = None
 _pending_memory: PendingSignalManager = None
 
 # Hurst exponent thresholds
-HURST_CHOP_THRESHOLD = 0.45    # Below this → skip (choppy market)
+HURST_CHOP_THRESHOLD = 0.52    # Below this → skip (Chop Zone — 69.5% win rate target)
 HURST_TREND_THRESHOLD = 0.55   # Above this → +2 consensus bonus
 
 

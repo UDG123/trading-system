@@ -1,6 +1,6 @@
 """
-OniQuant v5.9 — Autonomous Institutional Trading System
-FastAPI + Redis Stream Ingestor + Alpaca Paper Execution
+OniQuant v5.9 — Zero-Key Oracle
+FastAPI + Redis Stream Ingestor + LocalBroker (Virtual) + apscheduler
 """
 import os
 import logging
@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 
 # Install uvloop as the default event loop policy (before any loop creation)
 uvloop.install()
@@ -36,6 +37,7 @@ _diag_task = None
 _diag_service = None
 _price_service = None
 _redis_pool = None
+_scheduler = None
 
 
 async def _auto_report_scheduler():
@@ -165,6 +167,24 @@ async def lifespan(app: FastAPI):
     _diag_task = asyncio.create_task(_diag_service.run())
     logger.info("Diagnostics service started (checking every 5 min)")
 
+    # ── Performance Digest Scheduler (5:00 PM Toronto Time daily) ──
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from app.worker import send_daily_digest
+
+    global _scheduler
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(
+        send_daily_digest,
+        trigger=CronTrigger(hour=17, minute=0, timezone="America/Toronto"),
+        args=[SessionLocal],
+        id="daily_pnl_digest",
+        name="Daily PnL Digest (5 PM Toronto)",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    logger.info("APScheduler started: Daily PnL Digest at 17:00 America/Toronto")
+
     yield
 
     # Cancel background tasks
@@ -175,6 +195,10 @@ async def lifespan(app: FastAPI):
     if _diag_task:
         _diag_task.cancel()
         await _diag_service.stop()
+    # Shutdown scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        logger.info("APScheduler stopped")
     # Close Redis pool
     if _redis_pool:
         await _redis_pool.aclose()
@@ -183,9 +207,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Autonomous Institutional Trading System",
-    description="Phase 1: Webhook Receiver & Signal Logger",
-    version="1.0.0",
+    title="OniQuant v5.9 — Zero-Key Oracle",
+    description="Redis Stream Ingestor + LocalBroker + MCP Verification Gates",
+    version="5.9.0",
     lifespan=lifespan,
 )
 
@@ -204,3 +228,46 @@ app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])
+
+
+# ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───
+
+@app.get("/test-alpha-strike", response_class=ORJSONResponse)
+async def test_alpha_strike():
+    """
+    Fire a synthetic signal through TelegramService + OracleBridge
+    to verify dual-routing (Portfolio + Desk) and the Master Mix layout.
+    Hit from mobile browser: https://<railway-url>/test-alpha-strike
+    """
+    from app.services.telegram_notifications import TelegramService
+    from app.services.oracle_bridge import OracleBridge
+
+    # Synthetic signal data for layout verification
+    test_data = {
+        "desk_id": "DESK4_GOLD",
+        "ml_score": 3,
+        "hurst": 0.68,
+        "direction": "LONG",
+        "price": 2652.40,
+        "rvol": 1.8,
+        "vwap_z": 0.7,
+        "ml_conf": 75,
+        "sl": 2638.50,
+        "tp1": 2680.00,
+        "tv_link": "https://www.tradingview.com/chart/?symbol=XAUUSD",
+    }
+
+    # Format with Master Mix layout
+    message = OracleBridge.format_strike_message(test_data)
+
+    # Dual-route to Portfolio + DESK4_GOLD
+    tg = TelegramService()
+    await tg.broadcast_signal("DESK4_GOLD", message)
+
+    return {
+        "status": "sent",
+        "layout": "Master Mix (OracleBridge)",
+        "routing": ["TG_PORTFOLIO", "TG_DESK4_GOLD"],
+        "message_preview": message[:200],
+        "test_data": test_data,
+    }

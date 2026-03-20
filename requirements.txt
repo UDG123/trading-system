@@ -13,3 +13,4 @@ orjson==3.10.12
 redis[hiredis]==5.2.1
 uvloop==0.21.0
 litellm==1.82.4
+apscheduler==3.11.2
