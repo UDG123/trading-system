@@ -17,7 +17,6 @@ from app.routes.health import router as health_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.telegram import router as telegram_router
 from app.routes.control import router as control_router
-from app.routes.trade_queue import router as trade_queue_router
 from app.routes.ml_export import router as ml_export_router
 
 logging.basicConfig(
@@ -29,7 +28,6 @@ logger = logging.getLogger("TradingSystem")
 
 # Background task handles
 _report_task = None
-_simulator_task = None
 _diag_task = None
 _diag_service = None
 _price_service = None
@@ -126,7 +124,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     # Start background report scheduler
-    global _report_task, _simulator_task
+    global _report_task
     _report_task = asyncio.create_task(_auto_report_scheduler())
     logger.info("Report scheduler started (daily 21:30 UTC, weekly Fri, monthly last day)")
 
@@ -135,12 +133,6 @@ async def lifespan(app: FastAPI):
     global _price_service
     _price_service = PriceService()
     logger.info("PriceService ready (on-demand only, no continuous feed)")
-
-    # Start 4-provider JIT simulator (Binance WS + TD + FH + FMP)
-    from app.services.server_simulator import ServerSimulator
-    _sim = ServerSimulator()
-    _simulator_task = asyncio.create_task(_sim.run())
-    logger.info("4-Provider JIT simulator started (Binance WS + TD + FH + FMP)")
 
     # Start diagnostics service
     from app.services.diagnostics import DiagnosticsService
@@ -154,9 +146,6 @@ async def lifespan(app: FastAPI):
     # Cancel background tasks
     if _report_task:
         _report_task.cancel()
-    if _simulator_task:
-        _simulator_task.cancel()
-        await _sim.stop()
     if _price_service:
         await _price_service.close()
     if _diag_task:
@@ -186,5 +175,4 @@ app.include_router(webhook_router, prefix="/api", tags=["Webhook"])
 app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
-app.include_router(trade_queue_router, prefix="/api", tags=["Trade Queue"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])

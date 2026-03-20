@@ -1,5 +1,5 @@
 """
-Control Route — Kill switch, desk management, VPS status.
+Control Route — Kill switch, desk management.
 Accessible from /docs or Telegram. Independent of webhooks.
 """
 import logging
@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.config import DESKS
 from app.models.desk_state import DeskState
-from app.services.zmq_bridge import ZMQBridge
 from app.services.telegram_bot import TelegramBot
 from app.services.trade_reporter import TradeReporter
 
@@ -20,16 +19,8 @@ logger = logging.getLogger("TradingSystem.Control")
 router = APIRouter()
 
 # Shared instances
-_zmq: ZMQBridge = None
 _telegram: TelegramBot = None
 _reporter: TradeReporter = None
-
-
-def _get_zmq():
-    global _zmq
-    if _zmq is None:
-        _zmq = ZMQBridge()
-    return _zmq
 
 
 def _get_telegram():
@@ -52,17 +43,13 @@ async def kill_switch(
     db: Session = Depends(get_db),
 ):
     """
-    Emergency kill switch. Closes all positions and halts trading.
+    Emergency kill switch. Halts trading for all or a specific desk.
     scope: "ALL" for entire firm, or a desk ID like "DESK1_SCALPER"
     """
-    zmq_bridge = _get_zmq()
     telegram = _get_telegram()
 
     # Notify via Telegram
     await telegram.alert_kill_switch(scope, "API")
-
-    # Send to VPS
-    zmq_result = await zmq_bridge.send_kill_switch(scope)
 
     # Update desk states
     if scope == "ALL":
@@ -81,7 +68,6 @@ async def kill_switch(
     return {
         "status": "executed",
         "scope": scope,
-        "vps_response": zmq_result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -137,14 +123,6 @@ async def resume_desk(
     await telegram.send_message(f"▶️ <b>{desk_id}</b> resumed via API.")
 
     return {"status": "resumed", "desk_id": desk_id}
-
-
-@router.get("/vps/status")
-async def vps_status():
-    """Check VPS connection status and MT5 state."""
-    zmq_bridge = _get_zmq()
-    result = await zmq_bridge.get_vps_status()
-    return result
 
 
 @router.get("/desks")
