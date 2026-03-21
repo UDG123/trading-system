@@ -502,8 +502,11 @@ class VerificationWorker:
 
     async def _gate_hurst(self, symbol: str) -> Dict:
         """
-        Gate 1: NumPy Hurst exponent check.
-        Veto ANY signal where H < 0.52 (Chop Zone) — all desks.
+        Gate 1: Dynamic Hurst exponent check (time-aware regime filtering).
+        Threshold adjusts by EDT session:
+          - London/NY Overlap (8-12 EDT): H < 0.52 (trends reliable)
+          - NY Lunch (12-14 EDT):         H < 0.58 (high chop risk)
+          - Asian (19-03 EDT):            H < 0.55 (mean-reversion bias)
         This is the primary win-rate lever for 69.5% target.
         """
         result = await self._mcp.call_tool(
@@ -518,10 +521,18 @@ class VerificationWorker:
         if hurst is None:
             return {"rejected": False, "hurst": None}
 
-        if hurst < HURST_CHOP_THRESHOLD:
-            return {"rejected": True, "hurst": hurst}
+        # Dynamic threshold based on current EDT session
+        from app.services.twelvedata_enricher import TwelveDataEnricher
+        dynamic_threshold = TwelveDataEnricher().get_dynamic_hurst_threshold()
 
-        return {"rejected": False, "hurst": hurst}
+        if hurst < dynamic_threshold:
+            logger.info(
+                f"CHOP ZONE | {symbol} | H={hurst:.3f} < {dynamic_threshold} "
+                f"(session-adjusted threshold)"
+            )
+            return {"rejected": True, "hurst": hurst, "threshold": dynamic_threshold}
+
+        return {"rejected": False, "hurst": hurst, "threshold": dynamic_threshold}
 
     async def _gate_indicator_alignment(
         self, symbol: str, direction: Optional[str], alert_type: str

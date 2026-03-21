@@ -60,6 +60,36 @@ class TwelveDataEnricher:
         self.api_key = TWELVEDATA_API_KEY
         self.client = httpx.AsyncClient(timeout=10.0)
 
+    def get_dynamic_hurst_threshold(self) -> float:
+        """
+        Time-aware Hurst threshold based on current EDT session.
+        Prevents false-breakout losses during low-volume hours and
+        captures early trends during high-volume sessions.
+
+        Returns:
+            float: dynamic Hurst threshold for the current session
+        """
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from backports.zoneinfo import ZoneInfo
+
+        now_edt = datetime.now(ZoneInfo("America/New_York"))
+        hour = now_edt.hour
+
+        if 8 <= hour < 12:
+            # London/NY Overlap — high volatility, trends are reliable
+            return 0.52
+        elif 12 <= hour < 14:
+            # NY Lunch — high chop risk, need extreme persistence
+            return 0.58
+        elif 19 <= hour or hour < 3:
+            # Asian Session — mean-reversion bias
+            return 0.55
+        else:
+            # Default (early NY, late NY)
+            return 0.52
+
     async def enrich(self, symbol: str, timeframe: str, price: float) -> Dict:
         """
         Fetch market context for a signal. Returns enrichment dict.
