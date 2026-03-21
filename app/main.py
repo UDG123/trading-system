@@ -187,16 +187,16 @@ async def lifespan(app: FastAPI):
     # ── Performance Digest Scheduler (5:00 PM Toronto Time daily) ──
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
-    from app.worker import send_daily_digest
+    from app.services.performance_tracker import run_daily_performance_report
 
     global _scheduler
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(
-        send_daily_digest,
+        run_daily_performance_report,
         trigger=CronTrigger(hour=17, minute=0, timezone="America/Toronto"),
         args=[SessionLocal],
         id="daily_pnl_digest",
-        name="Daily PnL Digest (5 PM Toronto)",
+        name="Daily Performance Report (5 PM Toronto)",
         replace_existing=True,
     )
     _scheduler.start()
