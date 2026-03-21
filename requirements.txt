@@ -14,3 +14,5 @@ redis[hiredis]==5.2.1
 uvloop==0.21.0
 litellm==1.82.4
 apscheduler==3.11.2
+yfinance>=0.2.36
+pandas>=2.1.0

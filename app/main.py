@@ -23,6 +23,7 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.telegram import router as telegram_router
 from app.routes.control import router as control_router
 from app.routes.ml_export import router as ml_export_router
+from app.routes.backtest import router as backtest_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
     from app.models.trade import Trade  # noqa
     from app.models.desk_state import DeskState  # noqa
     from app.models.ml_trade_log import MLTradeLog  # noqa — ensure table created
+    from app.models.backtest_result import BacktestResult  # noqa — backtest virtual ledger
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables verified (including ml_training_data)")
 
@@ -145,6 +147,21 @@ async def lifespan(app: FastAPI):
         logger.info(f"Redis connected: {REDIS_URL.split('@')[-1] if '@' in REDIS_URL else REDIS_URL}")
     except Exception as e:
         logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
+
+    # ── Pending Memory Engine — recover parked signals from DB ──
+    from app.services.pending_memory import PendingSignalManager
+    pending_mgr = PendingSignalManager()
+    startup_db = SessionLocal()
+    try:
+        recovered = pending_mgr.sync_on_startup(startup_db)
+        if recovered:
+            logger.info(f"Pending Memory: {len(recovered)} signal(s) recovered from DB")
+        else:
+            logger.info("Pending Memory: clean slate — no pending signals")
+    except Exception as e:
+        logger.warning(f"Pending Memory startup sync failed: {e}")
+    finally:
+        startup_db.close()
 
     logger.info("OniQuant v5.9 Ingestor ONLINE (uvloop + orjson + Redis Streams)")
     logger.info("=" * 60)
@@ -228,6 +245,7 @@ app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])
+app.include_router(backtest_router, tags=["Backtest"])
 
 
 # ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───

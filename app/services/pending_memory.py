@@ -167,6 +167,48 @@ class PendingSignalManager:
         logger.info(f"Force-expired {len(signals)} pending signal(s) (desk={desk_id or 'ALL'})")
         return len(signals)
 
+    def sync_on_startup(self, db: Session) -> List[Signal]:
+        """
+        Recover pending signals from PostgreSQL on startup.
+        Loads all non-expired PENDING_CONDITIONS signals into the worker loop
+        so the bot 'remembers' its intentions after a restart/deployment.
+
+        Returns:
+            List of active pending signals recovered from DB
+        """
+        now = datetime.now(timezone.utc)
+
+        # First, expire any signals that passed their TTL during downtime
+        expired = db.query(Signal).filter(
+            Signal.status == "PENDING_CONDITIONS",
+            Signal.ttl_expiry.isnot(None),
+            Signal.ttl_expiry <= now,
+        ).all()
+
+        for s in expired:
+            s.status = "EXPIRED"
+
+        if expired:
+            db.commit()
+            logger.info(f"Startup: expired {len(expired)} signal(s) that timed out during downtime")
+
+        # Load remaining active pending signals
+        active = self.get_pending_signals(db)
+
+        if active:
+            symbols = {}
+            for s in active:
+                symbols[s.symbol_normalized] = symbols.get(s.symbol_normalized, 0) + 1
+
+            logger.info(
+                f"Startup: recovered {len(active)} pending signal(s) from PostgreSQL | "
+                f"Symbols: {symbols}"
+            )
+        else:
+            logger.info("Startup: no pending signals to recover")
+
+        return active
+
     def calculate_wait_time_mins(self, signal: Signal) -> Optional[float]:
         """
         Calculate how long a signal waited in pending memory before release.
