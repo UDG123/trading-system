@@ -520,6 +520,7 @@ class VerificationWorker:
             alignment_pct=alignment_result.get("alignment_pct", 0),
             sentiment_risk=risk_flag,
             indicators=alignment_result.get("indicators", {}),
+            shadow_id=shadow_id,
         )
 
     async def _gate_hurst(self, symbol: str) -> Dict:
@@ -641,6 +642,7 @@ class VerificationWorker:
         alignment_pct: float,
         sentiment_risk: bool,
         indicators: Dict,
+        shadow_id: int = None,
     ):
         """
         Create Signal record → Pipeline → LocalBroker → TG Broadcast.

@@ -154,6 +154,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         elif command == "/health":
             await _handle_health(telegram)
 
+        elif command == "/sim":
+            await _handle_sim(telegram, db, args)
+
+        elif command == "/shadow":
+            await _handle_shadow(telegram, db)
+
+        elif command == "/labels":
+            await _handle_labels(telegram, db)
+
+        elif command == "/train":
+            await _handle_train(telegram, db)
+
+        elif command == "/backtest":
+            await _handle_backtest_cmd(telegram, db, args)
+
+        elif command == "/ohlcv":
+            await _handle_ohlcv(telegram, db)
+
         elif command == "/help":
             await _handle_help(telegram, chat_id)
 
@@ -521,6 +539,201 @@ async def _handle_providers(telegram: TelegramBot):
     await telegram._send_to_system(text)
 
 
+async def _handle_sim(telegram: TelegramBot, db: Session, args: list):
+    """Show sim profile summaries."""
+    from app.models.sim_models import SimProfile, SimPosition, SimEquitySnapshot
+    from sqlalchemy import func
+
+    profiles = db.query(SimProfile).all()
+    if not profiles:
+        await telegram._send_to_system("📊 No sim profiles configured yet.")
+        return
+
+    today = datetime.now(timezone.utc).date()
+    lines = []
+    for p in profiles:
+        equity_adj = (
+            db.query(func.coalesce(func.sum(SimPosition.unrealized_pnl), 0))
+            .filter(SimPosition.profile_id == p.id, SimPosition.status.in_(["OPEN", "PARTIAL"]))
+            .scalar() or 0
+        )
+        equity = p.current_balance + float(equity_adj)
+        open_ct = (
+            db.query(func.count(SimPosition.id))
+            .filter(SimPosition.profile_id == p.id, SimPosition.status.in_(["OPEN", "PARTIAL"]))
+            .scalar() or 0
+        )
+        daily_pnl = (
+            db.query(func.coalesce(func.sum(SimPosition.net_pnl), 0))
+            .filter(SimPosition.profile_id == p.id, SimPosition.status == "CLOSED",
+                    func.date(SimPosition.exit_time) == today)
+            .scalar() or 0
+        )
+        status = "🟢" if p.is_active else "🔴"
+        pnl_icon = "✅" if float(daily_pnl) >= 0 else "❌"
+        lines.append(
+            f"{status} <b>{p.name}</b> ({p.leverage}x)\n"
+            f"  💰 ${equity:,.0f} | {pnl_icon} ${float(daily_pnl):+,.0f} today\n"
+            f"  📈 {open_ct} open | Risk {p.risk_pct}%"
+        )
+
+    text = (
+        "🎮 <b>SIM PROFILES</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        + "\n\n".join(lines)
+        + f"\n\n📊 API: /api/sim/profiles"
+    )
+    await telegram._send_to_system(text)
+
+
+async def _handle_shadow(telegram: TelegramBot, db: Session):
+    """Show shadow signal stats."""
+    from app.models.shadow_signal import ShadowSignal
+    from sqlalchemy import func
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    total = db.query(func.count(ShadowSignal.id)).scalar() or 0
+    today_ct = db.query(func.count(ShadowSignal.id)).filter(ShadowSignal.created_at >= today_start).scalar() or 0
+    labeled = db.query(func.count(ShadowSignal.id)).filter(ShadowSignal.tb_label.isnot(None)).scalar() or 0
+    wins = db.query(func.count(ShadowSignal.id)).filter(ShadowSignal.tb_label == 1).scalar() or 0
+    approved = db.query(func.count(ShadowSignal.id)).filter(ShadowSignal.live_pipeline_approved == True).scalar() or 0
+    hurst_blocks = db.query(func.count(ShadowSignal.id)).filter(ShadowSignal.hurst_would_block == True).scalar() or 0
+
+    wr = round(wins / labeled * 100, 1) if labeled > 0 else 0
+    approve_pct = round(approved / total * 100, 1) if total > 0 else 0
+    hurst_pct = round(hurst_blocks / total * 100, 1) if total > 0 else 0
+
+    text = (
+        "👻 <b>SHADOW SIGNALS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Total          {total}\n"
+        f"📅 Today          {today_ct}\n"
+        f"🏷 Labeled        {labeled}\n"
+        f"🏆 Win Rate       {wr}%\n"
+        f"✅ Live Approved  {approve_pct}%\n"
+        f"🌊 Hurst Blocked  {hurst_pct}%\n\n"
+        f"📊 API: /api/shadow/stats"
+    )
+    await telegram._send_to_system(text)
+
+
+async def _handle_labels(telegram: TelegramBot, db: Session):
+    """Trigger triple-barrier labeling."""
+    from app.services.triple_barrier_labeler import TripleBarrierLabeler
+    from app.database import SessionLocal
+
+    await telegram._send_to_system("🏷 Running triple-barrier labeler...")
+
+    try:
+        labeler = TripleBarrierLabeler(SessionLocal)
+        count = await labeler.label_batch(limit=500)
+        await telegram._send_to_system(
+            f"🏷 <b>Labeling complete</b>\n"
+            f"Labeled: <code>{count}</code> signals"
+        )
+    except Exception as e:
+        await telegram._send_to_system(f"⚠️ Labeling error: {str(e)[:200]}")
+
+
+async def _handle_train(telegram: TelegramBot, db: Session):
+    """Trigger ML model training."""
+    from app.services.ml_trainer import MLTrainer
+    from app.database import SessionLocal
+
+    await telegram._send_to_system("🧠 Training ML models (CatBoost + XGBoost)...")
+
+    try:
+        trainer = MLTrainer(SessionLocal)
+        result = await trainer.train()
+        status = result.get("status", "unknown")
+
+        if status == "trained":
+            text = (
+                "🧠 <b>ML TRAINING COMPLETE</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏆 Model: <code>{result.get('model_type')}</code>\n"
+                f"📊 Samples: {result.get('sample_count')}\n"
+                f"🔧 Features: {result.get('feature_count')}\n"
+                f"📈 CatBoost AUC: {result.get('catboost_auc', 0):.4f}\n"
+                f"📈 XGBoost AUC: {result.get('xgboost_auc', 0):.4f}\n"
+            )
+            top = result.get("top_features", [])[:5]
+            if top:
+                text += "\n<b>Top Features:</b>\n"
+                for name, imp in top:
+                    text += f"  • {name}: {imp:.4f}\n"
+        elif status == "insufficient_data":
+            text = (
+                f"⚠️ Not enough labeled data.\n"
+                f"Have: {result.get('count')} | Need: {result.get('required')}\n"
+                f"Run /labels first to label shadow signals."
+            )
+        else:
+            text = f"⚠️ Training status: {status}\n{result.get('error', '')}"
+
+        await telegram._send_to_system(text)
+    except Exception as e:
+        await telegram._send_to_system(f"⚠️ Training error: {str(e)[:200]}")
+
+
+async def _handle_backtest_cmd(telegram: TelegramBot, db: Session, args: list):
+    """Show backtest info or recent results."""
+    text = (
+        "🔬 <b>BACKTEST</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Use the API to run backtests:\n\n"
+        "<code>POST /api/backtest</code>\n"
+        "<code>{"
+        '"start_date": "2025-01-01",'
+        '"end_date": "2025-03-01",'
+        '"profile": "SRV_100"'
+        "}</code>\n\n"
+        "Then poll: <code>GET /api/backtest/{id}</code>"
+    )
+    await telegram._send_to_system(text)
+
+
+async def _handle_ohlcv(telegram: TelegramBot, db: Session):
+    """Show OHLCV data stats."""
+    from sqlalchemy import text as sql_text
+
+    try:
+        result = db.execute(sql_text("""
+            SELECT symbol, COUNT(*) as bars,
+                   MIN(time) as earliest, MAX(time) as latest
+            FROM ohlcv_1m
+            GROUP BY symbol ORDER BY bars DESC LIMIT 10
+        """))
+        rows = result.fetchall()
+
+        if not rows:
+            await telegram._send_to_system(
+                "📊 <b>OHLCV DATA</b>\n\nNo data ingested yet.\n"
+                "Use <code>POST /api/ohlcv/ingest</code> to start."
+            )
+            return
+
+        total = sum(r[1] for r in rows)
+        lines = []
+        for r in rows:
+            lines.append(f"  {r[0]:<8} {r[1]:>8,} bars")
+
+        text = (
+            "📊 <b>OHLCV DATA</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Total bars: {total:,}\n"
+            f"Symbols: {len(rows)}\n\n"
+            + "\n".join(lines)
+        )
+        await telegram._send_to_system(text)
+    except Exception as e:
+        await telegram._send_to_system(
+            "📊 <b>OHLCV DATA</b>\n\nNo data yet (table may not exist).\n"
+            "Run migration first, then <code>POST /api/ohlcv/ingest</code>"
+        )
+
+
 async def _handle_help(telegram: TelegramBot, chat_id: str):
     """Show available commands."""
     text = (
@@ -543,8 +756,14 @@ async def _handle_help(telegram: TelegramBot, chat_id: str):
         "📊 <b>REPORTS</b>\n"
         "/daily — Daily report\n"
         "/weekly — Weekly report\n"
-        "/monthly — Monthly report\n"
-        "/mlstats — ML training data stats\n\n"
+        "/monthly — Monthly report\n\n"
+        "🎮 <b>SIMULATION</b>\n"
+        "/sim — Sim profile status\n"
+        "/shadow — Shadow signal stats\n"
+        "/labels — Run triple-barrier labeler\n"
+        "/train — Train ML models\n"
+        "/backtest — Backtest info\n"
+        "/ohlcv — OHLCV data stats\n\n"
         "💡 <b>SHORTCUTS</b>\n"
         "<code>scalper intraday swing gold alts equities</code>\n"
         "or just numbers: <code>1 2 3 4 5 6</code>"
