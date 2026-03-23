@@ -1,5 +1,5 @@
 """
-OniQuant v5.9 — Zero-Key Oracle
+OniQuant v6.0.1 — Shadow Sim Engine
 FastAPI + Redis Stream Ingestor + VirtualBroker (Shadow Sim) + apscheduler
 """
 import os
@@ -158,7 +158,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
 
-    logger.info("OniQuant v6.0 Ingestor ONLINE (uvloop + orjson + Redis Streams + Shadow Sim)")
+    logger.info("OniQuant v6.0.1 Ingestor ONLINE (uvloop + orjson + Redis Streams + Shadow Sim)")
     logger.info("=" * 60)
 
     # Start background report scheduler
