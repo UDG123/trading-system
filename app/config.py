@@ -1,9 +1,18 @@
 """
-OniQuant v5.9 — Institutional Trading Floor Configuration
+OniQuant v6.1 — Signal Generator Configuration
 6 Desks · 8 Analysts · 1 CTO · $600K Under Management
 """
 import os
 from typing import Dict, List
+
+# ─────────────────────────────────────────────────────────────
+# DEPRECATED — No longer used in v6.1 (signal generator mode):
+# METAAPI_TOKEN, METAAPI_ACCOUNT_ID, METAAPI_REGION
+# CTRADER_*, EXECUTION_MODE
+# RELAY_URLS
+# FMP_API_KEY (removed in v6.0.1)
+# FINNHUB_API_KEY (removed in v6.0.1)
+# ─────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────
 # ENVIRONMENT

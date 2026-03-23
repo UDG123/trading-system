@@ -172,7 +172,7 @@ class HealthResponse(BaseModel):
     database: str
     uptime_seconds: float
     signals_today: int
-    version: str = "6.0.1"
+    version: str = "6.1.0"
 
 
 class DeskSummary(BaseModel):

@@ -1,7 +1,7 @@
 """
 VirtualBroker — Realistic trade execution simulator.
 Models dynamic spreads, slippage, commission, fill probability, and latency.
-Replaces simple LocalBroker/PaperExecutor for all simulation.
+Used for shadow simulation and backtesting data collection.
 """
 import math
 import random

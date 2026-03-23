@@ -96,7 +96,7 @@ class MLTradeLog(Base):
     raw_consensus = Column(JSON, nullable=True)            # full consensus output
     raw_claude_response = Column(JSON, nullable=True)      # full CTO response
 
-    # ── NovaQuant Schema Alignment ──
+    # ── OniQuant Schema Alignment ──
     webhook_latency_ms = Column(Integer, nullable=True)    # TV alert → server arrival
     rationale = Column(JSON, nullable=True, default=dict)  # structured CTO reasoning (JSONB)
 
