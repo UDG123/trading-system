@@ -151,7 +151,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
 
-    logger.info("OniQuant v5.9 Ingestor ONLINE (uvloop + orjson + Redis Streams)")
+    logger.info("OniQuant v6.0 Ingestor ONLINE (uvloop + orjson + Redis Streams + Shadow Sim)")
     logger.info("=" * 60)
 
     # Start background report scheduler
@@ -302,9 +302,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OniQuant v5.9 — Zero-Key Oracle",
-    description="Redis Stream Ingestor + LocalBroker + MCP Verification Gates",
-    version="5.9.0",
+    title="OniQuant v6.0 — Shadow Sim Engine",
+    description="Redis Stream Ingestor + Shadow Pipeline + Virtual Broker + ML Trainer",
+    version="6.0.0",
     lifespan=lifespan,
 )
 
