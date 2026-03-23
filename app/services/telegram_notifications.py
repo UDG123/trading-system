@@ -28,8 +28,7 @@ class TelegramService:
                     await client.post(self.url, json={
                         "chat_id": chat_id,
                         "text": message,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": False
+                        "disable_web_page_preview": True
                     })
                 except Exception as e:
                     logger.error(f"Failed to send to {chat_id}: {e}")

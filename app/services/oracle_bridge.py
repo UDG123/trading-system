@@ -8,21 +8,19 @@ class OracleBridge:
     @staticmethod
     def format_strike_message(data: dict):
         bar = OracleBridge.get_strength_bar(data.get('ml_score', 0))
-        regime = "🟢 TRENDING" if data.get('hurst', 0) > 0.55 else "🟡 NEUTRAL"
+        regime = "TRENDING" if data.get('hurst', 0) > 0.55 else "NEUTRAL"
+        hurst_val = data.get('hurst', 0)
 
         return (
-            f"🤖 <b>ONIQ v6.0 | {data['desk_id']}</b>\n\n"
-            f"📶 <b>STRENGTH:</b> {bar} ({data['ml_score']}/4)\n"
-            f"🌊 <b>REGIME:</b> {regime} (H: {data.get('hurst', 0):.2f})\n"
-            f"🚀 <b>ACTION:</b> <b>{data['direction']}</b> @ <code>{data['price']}</code>\n"
+            f"OniQuant v6.0 | {data['desk_id']}\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📊 <b>ALPHA METRICS</b>\n"
-            f"• RVOL: <code>{data.get('rvol', 0):.1f}x</code> | VWAP Z: <code>{data.get('vwap_z', 0):.1f}</code>\n"
-            f"• ML Conf: <code>{data.get('ml_conf', 0)}%</code>\n"
+            f"STRENGTH: {bar} ({data['ml_score']}/4)\n"
+            f"REGIME: {regime} (H: {hurst_val:.2f})\n"
+            f"ACTION: {data['direction']} @ {data['price']}\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📝 <b>LEVELS</b>\n"
-            f"🛑 <b>STOP:</b> <code>{data['sl']}</code>\n"
-            f"✅ <b>TARGET:</b> <code>{data['tp1']}</code>\n"
+            f"RVOL: {data.get('rvol', 0):.1f}x | VWAP Z: {data.get('vwap_z', 0):.1f}\n"
+            f"ML Conf: {data.get('ml_conf', 0)}%\n"
             f"━━━━━━━━━━━━━━\n"
-            f"🔗 <a href=\"{data['tv_link']}\">OPEN STRIKE CHART</a>"
+            f"STOP: {data['sl']}\n"
+            f"TARGET: {data['tp1']}\n"
         )
