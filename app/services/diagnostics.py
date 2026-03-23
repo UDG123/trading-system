@@ -142,10 +142,6 @@ class DiagnosticsService:
         issues = []
         if not os.getenv("TWELVEDATA_API_KEY"):
             issues.append("🔴 TWELVEDATA_API_KEY not set")
-        if not os.getenv("FINNHUB_API_KEY"):
-            issues.append("🔴 FINNHUB_API_KEY not set")
-        if not os.getenv("FMP_API_KEY"):
-            issues.append("🔴 FMP_API_KEY not set")
         return issues
 
     def _check_api_keys(self) -> List[str]:
@@ -433,8 +429,7 @@ class DiagnosticsService:
                 # Provider key availability
                 active_providers = sum([
                     bool(os.getenv("TWELVEDATA_API_KEY")),
-                    bool(os.getenv("FINNHUB_API_KEY")),
-                    bool(os.getenv("FMP_API_KEY")),
+                    True,  # Binance REST (no key needed)
                 ])
 
                 # Error count

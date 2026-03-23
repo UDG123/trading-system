@@ -1,6 +1,6 @@
 """
 OniQuant v5.9 — Zero-Key Oracle
-FastAPI + Redis Stream Ingestor + LocalBroker (Virtual) + apscheduler
+FastAPI + Redis Stream Ingestor + VirtualBroker (Shadow Sim) + apscheduler
 """
 import os
 import logging
@@ -309,9 +309,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OniQuant v6.0 — Shadow Sim Engine",
+    title="OniQuant v6.0.1 — Shadow Sim Engine",
     description="Redis Stream Ingestor + Shadow Pipeline + Virtual Broker + ML Trainer",
-    version="6.0.0",
+    version="6.0.1",
     lifespan=lifespan,
 )
 
