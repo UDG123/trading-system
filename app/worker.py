@@ -783,6 +783,33 @@ class VerificationWorker:
 
 
 # ═════════════════════════════════════════════════════════════════
+# Health Server — minimal HTTP so Railway healthcheck passes
+# ═════════════════════════════════════════════════════════════════
+
+async def _run_health_server():
+    """Minimal async HTTP health server so Railway healthcheck passes."""
+    port = int(os.getenv("PORT", "8080"))
+    async def handle_client(reader, writer):
+        try:
+            await reader.read(4096)
+            body = b'{"status":"worker_alive"}'
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(response)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+    server = await asyncio.start_server(handle_client, "0.0.0.0", port)
+    logger.info(f"Worker health server listening on :{port}")
+
+
+# ═════════════════════════════════════════════════════════════════
 # Entry Point
 # ═════════════════════════════════════════════════════════════════
 
@@ -807,6 +834,7 @@ async def main():
 
     worker = VerificationWorker()
     try:
+        await _run_health_server()
         await worker.start()
     finally:
         await worker.stop()
