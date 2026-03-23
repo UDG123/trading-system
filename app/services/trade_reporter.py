@@ -76,7 +76,7 @@ class TradeReporter:
                 f"📊 {label} DESK\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📅 {period_label}\n\n"
-                f"<i>No closed trades this period</i>"
+                f"No closed trades this period"
             )
 
         # Split trades into categories by close_reason prefix / status
@@ -97,17 +97,17 @@ class TradeReporter:
 
         # Server sim section
         if srv_trades:
-            text += f"\n🖥️ <b>SERVER SIM</b>\n"
+            text += f"\n🖥️ SERVER SIM\n"
             text += self._format_trade_section(srv_trades, desk_id, "SRV")
 
         # MT5 sim section
         if mt5_trades:
-            text += f"\n\n📟 <b>MT5 SIM</b>\n"
+            text += f"\n\n📟 MT5 SIM\n"
             text += self._format_trade_section(mt5_trades, desk_id, "MT5")
 
         # OniAI section
         if oniai_trades:
-            text += f"\n\n🤖 <b>OniAI VIRTUAL</b>\n"
+            text += f"\n\n🤖 OniAI VIRTUAL\n"
             text += self._format_trade_section(oniai_trades, desk_id, "OniAI")
 
         return text
@@ -219,7 +219,7 @@ class TradeReporter:
             oniai_by_desk[desk_id] = oni
 
         text = (
-            f"🏛 <b>ONIQUANT — {period_label.split('·')[0].strip().upper()}</b>\n"
+            f"🏛 ONIQUANT — {period_label.split('·')[0].strip().upper()}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📅 {period_label}\n"
         )
@@ -227,23 +227,23 @@ class TradeReporter:
         # Server sim section
         has_srv = any(len(t) > 0 for t in srv_by_desk.values())
         if has_srv:
-            text += f"\n🖥️ <b>SERVER SIM</b>"
+            text += f"\n🖥️ SERVER SIM"
             text += self._format_portfolio_section(srv_by_desk, "SRV")
 
         # MT5 sim section
         has_mt5 = any(len(t) > 0 for t in mt5_by_desk.values())
         if has_mt5:
-            text += f"\n\n📟 <b>MT5 SIM</b>"
+            text += f"\n\n📟 MT5 SIM"
             text += self._format_portfolio_section(mt5_by_desk, "MT5")
 
         # OniAI section
         has_oniai = any(len(t) > 0 for t in oniai_by_desk.values())
         if has_oniai:
-            text += f"\n\n🤖 <b>OniAI VIRTUAL</b>"
+            text += f"\n\n🤖 OniAI VIRTUAL"
             text += self._format_portfolio_section(oniai_by_desk, "OniAI")
 
         if not has_srv and not has_mt5 and not has_oniai:
-            text += "\n\n<i>No closed trades this period</i>"
+            text += "\n\nNo closed trades this period"
 
         return text
 
@@ -284,7 +284,7 @@ class TradeReporter:
             )
 
         if not desk_lines:
-            return f"\n\n<i>No {section_label.lower()} trades this period</i>"
+            return f"\n\nNo {section_label.lower()} trades this period"
 
         net_pips = total_pips_won + total_pips_lost
         total_losses = total_trades - total_wins

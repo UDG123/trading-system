@@ -111,7 +111,7 @@ async def generate_daily_digest(db_session_factory) -> str:
             emoji = desk_emoji.get(r.desk_id, "▪️")
             pnl_indicator = "✅" if float(r.pnl_dollars) >= 0 else "❌"
             desk_lines.append(
-                f"  {emoji} <b>{r.desk_id}</b>\n"
+                f"  {emoji} {r.desk_id}\n"
                 f"     {r.wins}W / {r.losses}L ({wr:.0f}%) | "
                 f"{pnl_indicator} {float(r.pnl_pips):+.1f} pips | "
                 f"${float(r.pnl_dollars):+,.0f} | "
@@ -130,16 +130,16 @@ async def generate_daily_digest(db_session_factory) -> str:
 
         msg = (
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>DAILY PnL REPORT</b>\n"
+            f"📊 DAILY PnL REPORT\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
             f"  📅 {today.strftime('%A, %B %d %Y')}\n"
-            f"  🎯 Win Rate: <b>{win_rate:.1f}%</b> {target_badge}\n"
-            f"  {pnl_emoji} Net P&L: <b>${total_pnl_dollars:+,.2f}</b> ({total_pnl_pips:+.1f} pips)\n"
+            f"  🎯 Win Rate: {win_rate:.1f}% {target_badge}\n"
+            f"  {pnl_emoji} Net P&L: ${total_pnl_dollars:+,.2f} ({total_pnl_pips:+.1f} pips)\n"
             f"  📈 Trades: {total_trades} ({total_wins}W / {total_losses}L)\n"
             f"  🌊 Chop Vetoes: {vetoed} signals filtered\n"
             f"\n"
-            f"┌─ <b>DESK BREAKDOWN</b>\n"
+            f"┌─ DESK BREAKDOWN\n"
         )
         for line in desk_lines:
             msg += f"│\n│{line}\n"

@@ -124,7 +124,7 @@ class TelegramBot:
     def _format_timeframe(self, tf):
         return _format_tf(tf)
 
-    async def send_message(self, text, chat_id=None, parse_mode="HTML"):
+    async def send_message(self, text, chat_id=None):
         if not self.enabled:
             logger.debug(f"[TG-DISABLED] {text[:100]}")
             return False
@@ -134,7 +134,7 @@ class TelegramBot:
         try:
             resp = await self.client.post(
                 f"{TELEGRAM_API.format(token=self.token)}/sendMessage",
-                json={"chat_id": target, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True},
+                json={"chat_id": target, "text": text, "disable_web_page_preview": True},
             )
             if resp.status_code == 200:
                 return True
@@ -216,9 +216,9 @@ class TelegramBot:
                 t2_l = [round(t2p * pv * l, 0) for l in lots]
                 proj = "\n\u2501\u2501\u2501 PROJECTED P&L \u2501\u2501\u2501\u2501\u2501\u2501\n\n"
                 if t2p > 0:
-                    proj += f"<code>\U0001f4b5 0.01    -${sl_l[0]:.0f}  \u2192  +${t1_l[0]:.0f}  \u2192  +${t2_l[0]:.0f}\n\U0001f4b5 0.10    -${sl_l[1]:.0f}  \u2192  +${t1_l[1]:.0f}  \u2192  +${t2_l[1]:.0f}\n\U0001f4b5 1.00    -${sl_l[2]:,.0f} \u2192  +${t1_l[2]:,.0f} \u2192  +${t2_l[2]:,.0f}</code>"
+                    proj += f"\U0001f4b5 0.01    -${sl_l[0]:.0f}  \u2192  +${t1_l[0]:.0f}  \u2192  +${t2_l[0]:.0f}\n\U0001f4b5 0.10    -${sl_l[1]:.0f}  \u2192  +${t1_l[1]:.0f}  \u2192  +${t2_l[1]:.0f}\n\U0001f4b5 1.00    -${sl_l[2]:,.0f} \u2192  +${t1_l[2]:,.0f} \u2192  +${t2_l[2]:,.0f}"
                 else:
-                    proj += f"<code>\U0001f4b5 0.01    -${sl_l[0]:.0f}  \u2192  +${t1_l[0]:.0f}\n\U0001f4b5 0.10    -${sl_l[1]:.0f}  \u2192  +${t1_l[1]:.0f}\n\U0001f4b5 1.00    -${sl_l[2]:,.0f} \u2192  +${t1_l[2]:,.0f}</code>"
+                    proj += f"\U0001f4b5 0.01    -${sl_l[0]:.0f}  \u2192  +${t1_l[0]:.0f}\n\U0001f4b5 0.10    -${sl_l[1]:.0f}  \u2192  +${t1_l[1]:.0f}\n\U0001f4b5 1.00    -${sl_l[2]:,.0f} \u2192  +${t1_l[2]:,.0f}"
         except Exception as e:
             logger.debug(f"Projection calc failed: {e}")
 
@@ -231,31 +231,31 @@ class TelegramBot:
         ex = f"\u23f1 {exec_time:.1f}s  \u00b7  " if exec_time and exec_time > 0 else ""
 
         text = (
-            f"<b>\u27d0 OniQuant</b>\n"
-            f"<b>{BAR}</b>\n"
-            f"{dir_e} <b>{symbol}  \u00b7  {direction}  \u00b7  {price}</b>\n"
-            f"{de} <b>{dl}</b>{gold} \u00b7 {tf} \u00b7 {te} {tl}\n"
+            f"\u27d0 OniQuant\n"
+            f"{BAR}\n"
+            f"{dir_e} {symbol}  \u00b7  {direction}  \u00b7  {price}\n"
+            f"{de} {dl}{gold} \u00b7 {tf} \u00b7 {te} {tl}\n"
             f"\U0001f9ed {align}\n\n"
-            f"   \U0001f534  SL     <code>{sl_d}</code>\n"
-            f"   \U0001f3af  TP1    <code>{tp1_d}</code>\n"
+            f"   \U0001f534  SL     {sl_d}\n"
+            f"   \U0001f3af  TP1    {tp1_d}\n"
         )
         if tp2_d:
-            text += f"   \U0001f3af  TP2    <code>{tp2_d}</code>\n"
+            text += f"   \U0001f3af  TP2    {tp2_d}\n"
         text += (
-            f"\n   \U0001f4b0  <b>${risk:.2f}</b>  \u00b7  {risk_pct:.2f}%\n"
+            f"\n   \U0001f4b0  ${risk:.2f}  \u00b7  {risk_pct:.2f}%\n"
             f"{rr_line}{rsi_line}"
-            f"<b>{BAR}</b>\n"
-            f"{sb}  <b>{score}/10</b>  {sl_lbl}\n"
+            f"{BAR}\n"
+            f"{sb}  {score}/10  {sl_lbl}\n"
             f"{proj}\n\n"
-            f"<i>{reasoning}</i>\n\n"
-            f"{ex}<i>{dl}{gold}  \u00b7  {now}</i>\n"
+            f"{reasoning}\n\n"
+            f"{ex}{dl}{gold}  \u00b7  {now}\n"
             f"\U0001f50b {cb}"
         )
         await self._send_to_desk(desk, text)
 
         summary = (
-            f"\u27d0 {dir_e} <b>{symbol}</b> {direction} \u00b7 ${risk:.0f} \u00b7 RR {rr_val}\n"
-            f"     {sb} <b>{score}</b>/10 \u00b7 {dl}{gold}"
+            f"\u27d0 {dir_e} {symbol} {direction} \u00b7 ${risk:.0f} \u00b7 RR {rr_val}\n"
+            f"     {sb} {score}/10 \u00b7 {dl}{gold}"
         )
         await self._send_to_portfolio(summary)
 
@@ -275,16 +275,16 @@ class TelegramBot:
         elif "ONIAI_" in reason: src = " \U0001f916"; cr = reason.replace("ONIAI_", "")
 
         text = (
-            f"<b>\u27d0 OniQuant</b>\n"
-            f"<b>{BAR}</b>\n"
-            f"{re} <b>{symbol}  \u00b7  CLOSED  \u00b7  ${pnl:+,.2f}</b>{src}\n\n"
+            f"\u27d0 OniQuant\n"
+            f"{BAR}\n"
+            f"{re} {symbol}  \u00b7  CLOSED  \u00b7  ${pnl:+,.2f}{src}\n\n"
             f"   {de}  Desk     {dl}\n"
             f"   \U0001f4cb  Reason   {cr}\n"
-            f"<b>{BAR}</b>\n"
-            f"<i>{datetime.now(timezone.utc).strftime('%H:%M UTC')}</i>"
+            f"{BAR}\n"
+            f"{datetime.now(timezone.utc).strftime('%H:%M UTC')}"
         )
         await self._send_to_desk(desk_id, text)
-        await self._send_to_portfolio(f"\u27d0 {re} <b>{symbol}</b> ${pnl:+.2f} \u00b7 {cr} \u00b7 {dl}")
+        await self._send_to_portfolio(f"\u27d0 {re} {symbol} ${pnl:+.2f} \u00b7 {cr} \u00b7 {dl}")
 
     # ━━━ OniAI VIRTUAL TRADE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -323,36 +323,36 @@ class TelegramBot:
             pass
 
         text = (
-            f"<b>\u27d0 OniQuant</b>\n"
-            f"<b>{BAR}</b>\n"
-            f"\U0001f916 <b>OniAI SIGNAL  \u00b7  {symbol} {arrow} {direction}</b>\n"
-            f"{de} <b>{dl}</b>{gold} \u00b7 {tf} \u00b7 {te} {tl}\n"
+            f"\u27d0 OniQuant\n"
+            f"{BAR}\n"
+            f"\U0001f916 OniAI SIGNAL  \u00b7  {symbol} {arrow} {direction}\n"
+            f"{de} {dl}{gold} \u00b7 {tf} \u00b7 {te} {tl}\n"
             f"\U0001f9ed {align}\n\n"
-            f"   \U0001f4b2  Entry    <code>{price}</code>\n"
-            f"   \U0001f534  SL      <code>{sl}</code>\n"
-            f"   \U0001f3af  TP1     <code>{tp1}</code>\n"
+            f"   \U0001f4b2  Entry    {price}\n"
+            f"   \U0001f534  SL      {sl}\n"
+            f"   \U0001f3af  TP1     {tp1}\n"
             f"   \U0001f4ca  Conf    {confidence}{proj}\n\n"
-            f"   \u26a0\ufe0f  <b>Not executed:</b> {block_reason}\n"
+            f"   \u26a0\ufe0f  Not executed: {block_reason}\n"
             f"   \U0001f52c  Tracking as virtual trade\n"
-            f"<b>{BAR}</b>\n"
-            f"<i>{reasoning}</i>"
+            f"{BAR}\n"
+            f"{reasoning}"
         )
         await self._send_to_desk(desk, text)
         await self._send_to_portfolio(
-            f"\u27d0 \U0001f916 <b>OniAI</b> \u00b7 {dl}{gold} \u00b7 {symbol} {arrow} {direction} @ {price} \u00b7 \u26a0\ufe0f {block_reason}"
+            f"\u27d0 \U0001f916 OniAI \u00b7 {dl}{gold} \u00b7 {symbol} {arrow} {direction} @ {price} \u00b7 \u26a0\ufe0f {block_reason}"
         )
 
     # ━━━ PARTIAL CLOSE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def notify_partial_close(self, symbol, desk_id, pnl, pct_closed=50, be_price=0):
         text = (
-            f"<b>\u27d0 OniQuant</b>\n"
-            f"<b>{BAR}</b>\n"
-            f"\U0001f4d0 <b>{symbol}  \u00b7  PARTIAL CLOSE</b>\n\n"
-            f"   \u2705  {pct_closed:.0f}% closed at TP1    <b>${pnl:+.2f}</b>\n"
-            f"   \U0001f6e1\ufe0f  SL \u2192 breakeven       <code>{be_price}</code>\n"
-            f"<b>{BAR}</b>\n"
-            f"<i>Remaining {100 - pct_closed:.0f}% running to TP2</i>"
+            f"\u27d0 OniQuant\n"
+            f"{BAR}\n"
+            f"\U0001f4d0 {symbol}  \u00b7  PARTIAL CLOSE\n\n"
+            f"   \u2705  {pct_closed:.0f}% closed at TP1    ${pnl:+.2f}\n"
+            f"   \U0001f6e1\ufe0f  SL \u2192 breakeven       {be_price}\n"
+            f"{BAR}\n"
+            f"Remaining {100 - pct_closed:.0f}% running to TP2"
         )
         await self._send_to_desk(desk_id, text)
 
@@ -367,12 +367,12 @@ class TelegramBot:
         sl = _score_label(score)
 
         text = (
-            f"<b>\u27d0 OniQuant</b>\n"
-            f"<b>{BAR}</b>\n"
-            f"\u2298 <b>{symbol}  \u00b7  SKIPPED</b>\n"
-            f"{de} <b>{dl}</b>{gold} \u00b7 {tf}\n\n"
-            f"   {sb}  <b>{score}/10</b>  {sl}\n"
-            f"<i>{reason[:200]}</i>"
+            f"\u27d0 OniQuant\n"
+            f"{BAR}\n"
+            f"\u2298 {symbol}  \u00b7  SKIPPED\n"
+            f"{de} {dl}{gold} \u00b7 {tf}\n\n"
+            f"   {sb}  {score}/10  {sl}\n"
+            f"{reason[:200]}"
         )
         await self._send_to_desk(desk_id, text)
 
@@ -381,11 +381,11 @@ class TelegramBot:
     async def alert_drawdown(self, desk_id, daily_loss, level):
         dl = DESK_LABEL.get(desk_id, desk_id)
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\u26a0\ufe0f <b>DRAWDOWN  \u00b7  {dl}</b>\n\n"
-            f"   \U0001f4c9  Daily loss     <b>\u2212${abs(daily_loss):.2f}</b>\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\u26a0\ufe0f DRAWDOWN  \u00b7  {dl}\n\n"
+            f"   \U0001f4c9  Daily loss     \u2212${abs(daily_loss):.2f}\n"
             f"   \U0001f4ca  Level          {level}\n"
-            f"<b>{BAR}</b>\n<i>Action required if loss continues.</i>"
+            f"{BAR}\nAction required if loss continues."
         )
         await self._send_to_system(text)
         await self._send_to_desk(desk_id, text)
@@ -393,10 +393,10 @@ class TelegramBot:
     async def alert_consecutive_losses(self, desk_id, count, action):
         dl = DESK_LABEL.get(desk_id, desk_id)
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\U0001f534 <b>LOSS STREAK  \u00b7  {dl}</b>\n\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\U0001f534 LOSS STREAK  \u00b7  {dl}\n\n"
             f"   \U0001f53b  Streak         {count} consecutive\n"
-            f"   \u2699\ufe0f  Action         {action}\n<b>{BAR}</b>"
+            f"   \u2699\ufe0f  Action         {action}\n{BAR}"
         )
         await self._send_to_system(text)
         await self._send_to_desk(desk_id, text)
@@ -404,9 +404,9 @@ class TelegramBot:
     async def alert_desk_paused(self, desk_id, reason):
         dl = DESK_LABEL.get(desk_id, desk_id)
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\u23f8\ufe0f <b>DESK PAUSED  \u00b7  {dl}</b>\n\n"
-            f"   \U0001f53b  {reason}\n   \U0001f512  Manual resume required\n<b>{BAR}</b>"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\u23f8\ufe0f DESK PAUSED  \u00b7  {dl}\n\n"
+            f"   \U0001f53b  {reason}\n   \U0001f512  Manual resume required\n{BAR}"
         )
         await self._send_to_system(text)
         await self._send_to_desk(desk_id, text)
@@ -414,30 +414,30 @@ class TelegramBot:
     async def alert_desk_resumed(self, desk_id):
         dl = DESK_LABEL.get(desk_id, desk_id)
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\u25b6\ufe0f <b>DESK RESUMED  \u00b7  {dl}</b>\n\n"
-            f"   \u2705  Size reset to 100%\n   \u2705  Loss streak cleared\n<b>{BAR}</b>"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\u25b6\ufe0f DESK RESUMED  \u00b7  {dl}\n\n"
+            f"   \u2705  Size reset to 100%\n   \u2705  Loss streak cleared\n{BAR}"
         )
         await self._send_to_system(text)
         await self._send_to_desk(desk_id, text)
 
     async def alert_firm_drawdown(self, total_loss, level):
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\U0001f6a8 <b>FIRM DRAWDOWN</b>\n\n"
-            f"   \U0001f4c9  Total loss     <b>\u2212${abs(total_loss):.2f}</b>\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\U0001f6a8 FIRM DRAWDOWN\n\n"
+            f"   \U0001f4c9  Total loss     \u2212${abs(total_loss):.2f}\n"
             f"   \U0001f4ca  Halt limit     {level}\n"
-            f"   \u2699\ufe0f  All desks      \u2192 50% size\n<b>{BAR}</b>"
+            f"   \u2699\ufe0f  All desks      \u2192 50% size\n{BAR}"
         )
         await self._send_to_all(text)
 
     async def alert_kill_switch(self, scope, triggered_by):
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\u26d4 <b>KILL SWITCH  \u00b7  {scope}</b>\n\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\u26d4 KILL SWITCH  \u00b7  {scope}\n\n"
             f"   \U0001f4cb  {triggered_by}\n"
             f"   \U0001f512  Closing all positions\n"
-            f"   \U0001f6ab  Trading halted\n<b>{BAR}</b>"
+            f"   \U0001f6ab  Trading halted\n{BAR}"
         )
         if scope == "ALL":
             await self._send_to_all(text)
@@ -456,28 +456,28 @@ class TelegramBot:
             dot = "\U0001f7e2" if info.get("status") == "ok" else "\U0001f534"
             lines.append(f"   {name:<12} {dot}  {info.get('detail', '')}")
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        text = f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n{he} <b>{hl}</b>\n\n" + "\n".join(lines) + f"\n<b>{BAR}</b>\n<i>{now}</i>"
+        text = f"\u27d0 OniQuant\n{BAR}\n{he} {hl}\n\n" + "\n".join(lines) + f"\n{BAR}\n{now}"
         await self._send_to_system(text)
 
     async def send_auto_repair(self, failed_service, fallback_service, detail=""):
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\U0001f527 <b>AUTO-REPAIR</b>\n\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\U0001f527 AUTO-REPAIR\n\n"
             f"   \u274c  {failed_service:<16} timeout\n"
             f"   \u2705  {fallback_service:<16} active (fallback)\n"
-            f"<b>{BAR}</b>\n<i>{detail}  \u00b7  {now}</i>"
+            f"{BAR}\n{detail}  \u00b7  {now}"
         )
         await self._send_to_system(text)
 
     async def send_heartbeat(self, uptime="", trades_today=0, errors=0, sim_trades=0):
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\U0001f493 <b>HEARTBEAT</b>  \u00b7  \u2705\n\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\U0001f493 HEARTBEAT  \u00b7  \u2705\n\n"
             f"   \U0001f550  Uptime         {uptime}\n"
             f"   \U0001f4ca  Trades today   {trades_today}\n"
             f"   \u274c  Errors         {errors}\n"
-            f"   \U0001f504  Sim trades     {sim_trades}\n<b>{BAR}</b>"
+            f"   \U0001f504  Sim trades     {sim_trades}\n{BAR}"
         )
         await self._send_to_system(text)
 
@@ -493,19 +493,19 @@ class TelegramBot:
         worst = report.get("worst_trade", {})
 
         text = (
-            f"<b>\u27d0 OniQuant  \u00b7  Daily Brief</b>\n<b>{BAR}</b>\n"
-            f"\U0001f4c5 <b>{date}</b>\n\n"
-            f"   \U0001f4b0  Firm PnL       {pe} <b>${tp:+.2f}</b>\n"
+            f"\u27d0 OniQuant  \u00b7  Daily Brief\n{BAR}\n"
+            f"\U0001f4c5 {date}\n\n"
+            f"   \U0001f4b0  Firm PnL       {pe} ${tp:+.2f}\n"
             f"   \U0001f4ca  Trades         {tt}\n"
             f"   \U0001f3af  Win Rate       {wr:.0%}\n"
-            f"<b>{BAR}</b>\n<b>DESK BREAKDOWN</b>\n\n"
+            f"{BAR}\nDESK BREAKDOWN\n\n"
         )
         for did, dd in report.get("desks", {}).items():
             n = DESKS.get(did, {}).get("name", did)
             p = dd.get("pnl", 0)
             t = dd.get("trades", 0)
-            text += f"   {_desk_dot(p)} {n:<14} <b>${p:+.2f}</b>    {t} trades\n"
-        text += f"<b>{BAR}</b>\n"
+            text += f"   {_desk_dot(p)} {n:<14} ${p:+.2f}    {t} trades\n"
+        text += f"{BAR}\n"
         if best: text += f"\U0001f3c6 Best   {best.get('symbol', '?')}  ${best.get('pnl', 0):+.2f}\n"
         if worst: text += f"\U0001f480 Worst  {worst.get('symbol', '?')}  ${worst.get('pnl', 0):+.2f}"
         await self._send_to_portfolio(text)
@@ -516,22 +516,22 @@ class TelegramBot:
             t = dd.get("trades", 0)
             w = dd.get("win_rate", 0)
             dt = (
-                f"<b>\u27d0 {n}  \u00b7  Daily</b>\n<b>{BAR}</b>\n"
-                f"\U0001f4c5 <b>{date}</b>\n\n"
-                f"   \U0001f4b0  PnL            {_pnl_emoji(p)} <b>${p:+.2f}</b>\n"
+                f"\u27d0 {n}  \u00b7  Daily\n{BAR}\n"
+                f"\U0001f4c5 {date}\n\n"
+                f"   \U0001f4b0  PnL            {_pnl_emoji(p)} ${p:+.2f}\n"
                 f"   \U0001f4ca  Trades         {t}\n"
-                f"   \U0001f3af  Win Rate       {w:.0%}\n<b>{BAR}</b>"
+                f"   \U0001f3af  Win Rate       {w:.0%}\n{BAR}"
             )
             await self._send_to_desk(did, dt)
 
     # ━━━ WEEKLY MEMO -> Portfolio ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def send_weekly_memo(self, memo):
-        header = f"<b>\u27d0 OniQuant  \u00b7  Weekly Memo</b>\n<b>{BAR}</b>\n\n"
+        header = f"\u27d0 OniQuant  \u00b7  Weekly Memo\n{BAR}\n\n"
         if len(header + memo) <= 4000:
             await self._send_to_portfolio(header + memo)
         else:
-            await self._send_to_portfolio(header + memo[:3900] + "\n\n<i>(continued...)</i>")
+            await self._send_to_portfolio(header + memo[:3900] + "\n\n(continued...)")
             rem = memo[3900:]
             while rem:
                 await self._send_to_portfolio(rem[:4000])
@@ -541,13 +541,13 @@ class TelegramBot:
 
     async def send_status(self, dashboard: Dict):
         text = (
-            f"<b>\u27d0 OniQuant</b>\n<b>{BAR}</b>\n"
-            f"\U0001f4c8 <b>FIRM STATUS</b>\n\n"
+            f"\u27d0 OniQuant\n{BAR}\n"
+            f"\U0001f4c8 FIRM STATUS\n\n"
             f"   Status:     {dashboard.get('firm_status', '?')}\n"
             f"   Signals:    {dashboard.get('total_signals_today', 0)}\n"
             f"   Trades:     {dashboard.get('total_trades_today', 0)}\n"
             f"   Daily PnL:  ${dashboard.get('total_daily_pnl', 0):+.2f}\n"
-            f"<b>{BAR}</b>\n"
+            f"{BAR}\n"
         )
         for d in dashboard.get("desks", []):
             dot = "\U0001f7e2" if d.get("is_active") else "\U0001f534"

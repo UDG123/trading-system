@@ -381,15 +381,15 @@ class DiagnosticsService:
         if not new_issues and not repairs:
             return
 
-        text = "🔧 <b>SYSTEM DIAGNOSTIC</b>\n━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        text = "🔧 SYSTEM DIAGNOSTIC\n━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         if new_issues:
-            text += "<b>Issues:</b>\n"
+            text += "Issues:\n"
             for issue in new_issues:
                 text += f"{issue}\n"
 
         if repairs:
-            text += "\n<b>Auto-Repairs:</b>\n"
+            text += "\nAuto-Repairs:\n"
             for repair in repairs:
                 text += f"🔧 {repair}\n"
 
@@ -441,7 +441,7 @@ class DiagnosticsService:
             status_emoji = "🟢" if total_errors == 0 else ("🟡" if total_errors < 5 else "🔴")
 
             text = (
-                f"{status_emoji} <b>SYSTEM HEALTH</b>\n"
+                f"{status_emoji} SYSTEM HEALTH\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📡 Price Providers   {active_providers}/3 configured\n"
                 f"📊 Open Trades       {open_srv} SRV · {open_oniai} OniAI\n"
@@ -528,11 +528,11 @@ class DiagnosticsService:
 
         # Format report
         text = (
-            "🔧 <b>FULL DIAGNOSTIC</b>\n"
+            "🔧 FULL DIAGNOSTIC\n"
             "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         )
         for category, status in results:
-            text += f"<b>{category}:</b> {status}\n"
+            text += f"{category}: {status}\n"
 
         text += (
             f"\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')} · "

@@ -29,10 +29,10 @@ CACHE_TTL_SECONDS = 60
 
 # TwelveData symbol mapping (our internal → TwelveData format)
 SYMBOL_MAP = {
-    "US30": "DJI",
-    "US500": "SPX",
-    "US100": "NDX",
-    "NAS100": "NDX",
+    "US30": "DIA",
+    "US500": "SPY",
+    "US100": "QQQ",
+    "NAS100": "QQQ",
     "GER40": "DAX",
     "UK100": "UKX",
     "JPN225": "NI225",

@@ -225,17 +225,17 @@ async def _handle_status(telegram: TelegramBot, db: Session):
             total_pnl += pnl
             total_trades += trades
             desk_lines.append(
-                f"{status} {emoji} <b>{label:<10}</b> "
+                f"{status} {emoji} {label:<10} "
                 f"${pnl:+,.0f}  ·  {trades}t  ·  "
                 f"L{state.consecutive_losses or 0}"
             )
         else:
             desk_lines.append(
-                f"🟢 {emoji} <b>{label:<10}</b> $0  ·  0t  ·  L0"
+                f"🟢 {emoji} {label:<10} $0  ·  0t  ·  L0"
             )
 
     text = (
-        f"🏛 <b>ONIQUANT STATUS</b>\n"
+        f"🏛 ONIQUANT STATUS\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📅 {datetime.now(timezone.utc).strftime('%b %d, %Y · %H:%M UTC')}\n\n"
     )
@@ -279,7 +279,7 @@ async def _handle_desk(telegram: TelegramBot, db: Session, desk_id: str):
             status = f"⏸️ Paused until {state.pause_until.strftime('%H:%M UTC') if state.pause_until else '?'}"
 
         text = (
-            f"{emoji} <b>{label} DESK</b>\n"
+            f"{emoji} {label} DESK\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🚦 Status     {status}\n"
             f"🔄 Trades     {state.trades_today}\n"
@@ -292,9 +292,9 @@ async def _handle_desk(telegram: TelegramBot, db: Session, desk_id: str):
         )
     else:
         text = (
-            f"{emoji} <b>{label} DESK</b>\n"
+            f"{emoji} {label} DESK\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"<i>No activity yet today.</i>\n\n"
+            f"No activity yet today.\n\n"
             f"🎯 Symbols    {', '.join(desk.get('symbols', []))}"
         )
 
@@ -351,11 +351,11 @@ async def _handle_pause(
     }.get(desk_id, desk_id)
 
     await telegram._send_to_system(
-        f"⏸️ <b>{label}</b> paused for {hours} hours\n"
+        f"⏸️ {label} paused for {hours} hours\n"
         f"Resumes at {state.pause_until.strftime('%H:%M UTC')}"
     )
     await telegram._send_to_desk(desk_id,
-        f"⏸️ <b>{label}</b> paused for {hours} hours"
+        f"⏸️ {label} paused for {hours} hours"
     )
 
 
@@ -380,8 +380,8 @@ async def _handle_resume(telegram: TelegramBot, db: Session, desk_id: str):
         "DESK5_ALTS": "ALTS", "DESK6_EQUITIES": "EQUITIES",
     }.get(desk_id, desk_id)
 
-    await telegram._send_to_system(f"▶️ <b>{label}</b> resumed. Trading active.")
-    await telegram._send_to_desk(desk_id, f"▶️ <b>{label}</b> resumed.")
+    await telegram._send_to_system(f"▶️ {label} resumed. Trading active.")
+    await telegram._send_to_desk(desk_id, f"▶️ {label} resumed.")
 
 
 async def _handle_report(telegram: TelegramBot, db: Session, period: str):
@@ -403,7 +403,7 @@ async def _handle_desks_list(telegram: TelegramBot, db: Session):
     from app.models.desk_state import DeskState
 
     text = (
-        f"📋 <b>ALL DESKS</b>\n"
+        f"📋 ALL DESKS\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     for desk_id, desk in DESKS.items():
@@ -415,13 +415,13 @@ async def _handle_desks_list(telegram: TelegramBot, db: Session):
         short = desk_id.split("_", 1)[1].lower() if "_" in desk_id else desk_id
         num = desk_id.replace("DESK", "").split("_")[0]
         syms = len(desk.get("symbols", []))
-        text += f"{emoji} <b>{short}</b> · {syms} symbols · /{num}\n"
+        text += f"{emoji} {short} · {syms} symbols · /{num}\n"
 
     text += (
         f"\n💡 Use short names in commands:\n"
-        f"<code>/desk scalper</code>\n"
-        f"<code>/kill gold</code>\n"
-        f"<code>/pause intraday 4</code>"
+        f"/desk scalper\n"
+        f"/kill gold\n"
+        f"/pause intraday 4"
     )
     await telegram._send_to_system(text)
 
@@ -435,7 +435,7 @@ async def _handle_mlstats(telegram: TelegramBot, db: Session):
     bar = "▓" * int(wr / 10) + "░" * (10 - int(wr / 10))
 
     text_msg = (
-        "🧠 <b>ML TRAINING DATA</b>\n"
+        "🧠 ML TRAINING DATA\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 Total Records    {stats.get('total_records', 0)}\n"
         f"✅ Completed        {stats.get('completed', 0)}\n"
@@ -451,7 +451,7 @@ async def _handle_mlstats(telegram: TelegramBot, db: Session):
 
     desk_stats = stats.get("per_desk", {})
     if desk_stats:
-        text_msg += "<b>Per Desk:</b>\n"
+        text_msg += "Per Desk:\n"
         for desk_id, ds in desk_stats.items():
             label = desk_id.split("_", 1)[1] if "_" in desk_id else desk_id
             text_msg += f"  {label:<12} {ds['wins']}W/{ds['total']}T  {ds['win_rate']:.0f}%\n"
@@ -507,7 +507,7 @@ async def _handle_health(telegram: TelegramBot):
         checks.append("🟡 Diagnostics (unknown)")
 
     text_msg = (
-        "⚡ <b>QUICK HEALTH</b>\n"
+        "⚡ QUICK HEALTH\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         + "\n".join(checks)
         + f"\n\n🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
@@ -520,7 +520,7 @@ async def _handle_providers(telegram: TelegramBot):
     import os
 
     text = (
-        "📡 <b>PRICE PROVIDERS</b>\n"
+        "📡 PRICE PROVIDERS\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
@@ -530,7 +530,7 @@ async def _handle_providers(telegram: TelegramBot):
     fmp_key = "✅" if os.getenv("FMP_API_KEY") else "❌"
 
     text += (
-        f"<b>API Keys:</b>\n"
+        f"API Keys:\n"
         f"TwelveData {td_key}\n"
         f"Finnhub {fh_key}\n"
         f"FMP {fmp_key}\n"
@@ -572,13 +572,13 @@ async def _handle_sim(telegram: TelegramBot, db: Session, args: list):
         status = "🟢" if p.is_active else "🔴"
         pnl_icon = "✅" if float(daily_pnl) >= 0 else "❌"
         lines.append(
-            f"{status} <b>{p.name}</b> ({p.leverage}x)\n"
+            f"{status} {p.name} ({p.leverage}x)\n"
             f"  💰 ${equity:,.0f} | {pnl_icon} ${float(daily_pnl):+,.0f} today\n"
             f"  📈 {open_ct} open | Risk {p.risk_pct}%"
         )
 
     text = (
-        "🎮 <b>SIM PROFILES</b>\n"
+        "🎮 SIM PROFILES\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         + "\n\n".join(lines)
         + f"\n\n📊 API: /api/sim/profiles"
@@ -605,7 +605,7 @@ async def _handle_shadow(telegram: TelegramBot, db: Session):
     hurst_pct = round(hurst_blocks / total * 100, 1) if total > 0 else 0
 
     text = (
-        "👻 <b>SHADOW SIGNALS</b>\n"
+        "👻 SHADOW SIGNALS\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 Total          {total}\n"
         f"📅 Today          {today_ct}\n"
@@ -629,8 +629,8 @@ async def _handle_labels(telegram: TelegramBot, db: Session):
         labeler = TripleBarrierLabeler(SessionLocal)
         count = await labeler.label_batch(limit=500)
         await telegram._send_to_system(
-            f"🏷 <b>Labeling complete</b>\n"
-            f"Labeled: <code>{count}</code> signals"
+            f"🏷 Labeling complete\n"
+            f"Labeled: {count} signals"
         )
     except Exception as e:
         await telegram._send_to_system(f"⚠️ Labeling error: {str(e)[:200]}")
@@ -650,9 +650,9 @@ async def _handle_train(telegram: TelegramBot, db: Session):
 
         if status == "trained":
             text = (
-                "🧠 <b>ML TRAINING COMPLETE</b>\n"
+                "🧠 ML TRAINING COMPLETE\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🏆 Model: <code>{result.get('model_type')}</code>\n"
+                f"🏆 Model: {result.get('model_type')}\n"
                 f"📊 Samples: {result.get('sample_count')}\n"
                 f"🔧 Features: {result.get('feature_count')}\n"
                 f"📈 CatBoost AUC: {result.get('catboost_auc', 0):.4f}\n"
@@ -660,7 +660,7 @@ async def _handle_train(telegram: TelegramBot, db: Session):
             )
             top = result.get("top_features", [])[:5]
             if top:
-                text += "\n<b>Top Features:</b>\n"
+                text += "\nTop Features:\n"
                 for name, imp in top:
                     text += f"  • {name}: {imp:.4f}\n"
         elif status == "insufficient_data":
@@ -680,16 +680,16 @@ async def _handle_train(telegram: TelegramBot, db: Session):
 async def _handle_backtest_cmd(telegram: TelegramBot, db: Session, args: list):
     """Show backtest info or recent results."""
     text = (
-        "🔬 <b>BACKTEST</b>\n"
+        "🔬 BACKTEST\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Use the API to run backtests:\n\n"
-        "<code>POST /api/backtest</code>\n"
-        "<code>{"
+        "POST /api/backtest\n"
+        "{"
         '"start_date": "2025-01-01",'
         '"end_date": "2025-03-01",'
         '"profile": "SRV_100"'
-        "}</code>\n\n"
-        "Then poll: <code>GET /api/backtest/{id}</code>"
+        "}\n\n"
+        "Then poll: GET /api/backtest/{id}"
     )
     await telegram._send_to_system(text)
 
@@ -709,8 +709,8 @@ async def _handle_ohlcv(telegram: TelegramBot, db: Session):
 
         if not rows:
             await telegram._send_to_system(
-                "📊 <b>OHLCV DATA</b>\n\nNo data ingested yet.\n"
-                "Use <code>POST /api/ohlcv/ingest</code> to start."
+                "📊 OHLCV DATA\n\nNo data ingested yet.\n"
+                "Use POST /api/ohlcv/ingest to start."
             )
             return
 
@@ -720,7 +720,7 @@ async def _handle_ohlcv(telegram: TelegramBot, db: Session):
             lines.append(f"  {r[0]:<8} {r[1]:>8,} bars")
 
         text = (
-            "📊 <b>OHLCV DATA</b>\n"
+            "📊 OHLCV DATA\n"
             "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Total bars: {total:,}\n"
             f"Symbols: {len(rows)}\n\n"
@@ -729,17 +729,17 @@ async def _handle_ohlcv(telegram: TelegramBot, db: Session):
         await telegram._send_to_system(text)
     except Exception as e:
         await telegram._send_to_system(
-            "📊 <b>OHLCV DATA</b>\n\nNo data yet (table may not exist).\n"
-            "Run migration first, then <code>POST /api/ohlcv/ingest</code>"
+            "📊 OHLCV DATA\n\nNo data yet (table may not exist).\n"
+            "Run migration first, then POST /api/ohlcv/ingest"
         )
 
 
 async def _handle_help(telegram: TelegramBot, chat_id: str):
     """Show available commands."""
     text = (
-        "🏛 <b>ONIQUANT COMMANDS</b>\n"
+        "🏛 ONIQUANT COMMANDS\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📊 <b>STATUS</b>\n"
+        "📊 STATUS\n"
         "/status — Firm dashboard\n"
         "/desk scalper — Single desk\n"
         "/desks — List all desks\n"
@@ -747,25 +747,25 @@ async def _handle_help(telegram: TelegramBot, chat_id: str):
         "/health — Quick system check\n"
         "/diag — Full diagnostic report\n"
         "/mlstats — ML training data stats\n\n"
-        "🛑 <b>CONTROL</b>\n"
+        "🛑 CONTROL\n"
         "/kill — Kill ALL desks\n"
         "/kill gold — Kill one desk\n"
         "/pause scalper — Pause 2h\n"
         "/pause scalper 4 — Pause 4h\n"
         "/resume scalper — Resume\n\n"
-        "📊 <b>REPORTS</b>\n"
+        "📊 REPORTS\n"
         "/daily — Daily report\n"
         "/weekly — Weekly report\n"
         "/monthly — Monthly report\n\n"
-        "🎮 <b>SIMULATION</b>\n"
+        "🎮 SIMULATION\n"
         "/sim — Sim profile status\n"
         "/shadow — Shadow signal stats\n"
         "/labels — Run triple-barrier labeler\n"
         "/train — Train ML models\n"
         "/backtest — Backtest info\n"
         "/ohlcv — OHLCV data stats\n\n"
-        "💡 <b>SHORTCUTS</b>\n"
-        "<code>scalper intraday swing gold alts equities</code>\n"
-        "or just numbers: <code>1 2 3 4 5 6</code>"
+        "💡 SHORTCUTS\n"
+        "scalper intraday swing gold alts equities\n"
+        "or just numbers: 1 2 3 4 5 6"
     )
     await telegram.send_message(text, chat_id=chat_id)

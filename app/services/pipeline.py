@@ -277,7 +277,7 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 signal.status = "SKIPPED_CHOP"
                 db.commit()
                 await telegram._send_to_system(
-                    f"🌊 <b>CHOP FILTER</b> | {signal.symbol_normalized} "
+                    f"🌊 CHOP FILTER | {signal.symbol_normalized} "
                     f"| H={hurst:.3f} < {HURST_CHOP_THRESHOLD} "
                     f"| {desk_id} — signal skipped (mean-reverting market)"
                 )
