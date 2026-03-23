@@ -1,6 +1,6 @@
 """
 OHLCV Ingester — Fetches and stores historical OHLCV data from
-TwelveData, Binance (crypto), and Finnhub (equities) into ohlcv_1m.
+TwelveData and Binance (crypto) into ohlcv_1m.
 """
 import os
 import asyncio
@@ -17,7 +17,6 @@ from app.config import DESKS
 logger = logging.getLogger("TradingSystem.OHLCVIngester")
 
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
 # TwelveData symbol mapping
 TD_MAP = {
@@ -197,44 +196,6 @@ class OHLCVIngester:
                     })
         except Exception as e:
             logger.debug(f"Binance fetch failed for {symbol}: {e}")
-
-        return bars
-
-    async def _fetch_finnhub_candles(
-        self, symbol: str, resolution: str, start: datetime, end: datetime
-    ) -> List[Dict]:
-        """Fetch from Finnhub stock candles endpoint."""
-        if not FINNHUB_API_KEY:
-            return []
-
-        bars = []
-        try:
-            resp = await self.client.get(
-                "https://finnhub.io/api/v1/stock/candle",
-                params={
-                    "symbol": symbol,
-                    "resolution": resolution,
-                    "from": int(start.timestamp()),
-                    "to": int(end.timestamp()),
-                    "token": FINNHUB_API_KEY,
-                },
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("s") == "ok":
-                    for i in range(len(data.get("t", []))):
-                        bars.append({
-                            "time": datetime.fromtimestamp(
-                                data["t"][i], tz=timezone.utc
-                            ).strftime("%Y-%m-%d %H:%M:%S"),
-                            "open": data["o"][i],
-                            "high": data["h"][i],
-                            "low": data["l"][i],
-                            "close": data["c"][i],
-                            "volume": data["v"][i],
-                        })
-        except Exception as e:
-            logger.debug(f"Finnhub fetch failed for {symbol}: {e}")
 
         return bars
 

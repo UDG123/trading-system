@@ -1,6 +1,5 @@
 """
 Trade Model - Tracks all executed trades and their lifecycle.
-Populated in Phase 3 when MT5 execution is connected.
 """
 from datetime import datetime, timezone
 from sqlalchemy import (
@@ -21,7 +20,7 @@ class Trade(Base):
     desk_id = Column(String(30), nullable=False, index=True)
     symbol = Column(String(20), nullable=False, index=True)
     direction = Column(String(10), nullable=False)  # LONG / SHORT
-    mt5_ticket = Column(Integer, nullable=True, unique=True)
+    mt5_ticket = Column(Integer, nullable=True, unique=True)  # Legacy ticket ID — used for unique trade identification
 
     # ── Sizing ──
     lot_size = Column(Float, nullable=False)

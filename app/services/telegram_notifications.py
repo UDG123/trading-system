@@ -28,7 +28,7 @@ class TelegramService:
                     await client.post(self.url, json={
                         "chat_id": chat_id,
                         "text": message,
-                        "parse_mode": "Markdown",
+                        "parse_mode": "HTML",
                         "disable_web_page_preview": False
                     })
                 except Exception as e:

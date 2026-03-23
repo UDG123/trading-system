@@ -271,7 +271,7 @@ class TelegramBot:
         src = ""
         cr = reason
         if "SRV_" in reason: src = " \U0001f5a5\ufe0f"; cr = reason.replace("SRV_", "")
-        elif "MT5_" in reason: src = " \U0001f4df"; cr = reason.replace("MT5_", "")
+        elif "SIM_" in reason: src = " \U0001f4df"; cr = reason.replace("SIM_", "")
         elif "ONIAI_" in reason: src = " \U0001f916"; cr = reason.replace("ONIAI_", "")
 
         text = (
