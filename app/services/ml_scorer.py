@@ -39,14 +39,45 @@ class MLScorer:
         Score a signal. Returns dict with:
         - ml_score: float 0.0–1.0 (probability of profitable trade)
         - ml_features: dict of features used
-        - ml_method: "model" or "rule_based"
+        - ml_method: "model" or "rule_based" or "catboost" or "xgboost"
         """
         features = self._extract_features(signal_data, enrichment, desk_id)
+
+        # Try CatBoost/XGBoost trained on shadow signal data first
+        gb_result = self._try_gradient_boosting(features)
+        if gb_result:
+            return gb_result
 
         if self.is_trained and self.model is not None:
             return self._model_score(features)
         else:
             return self._rule_based_score(features, signal_data, enrichment)
+
+    def _try_gradient_boosting(self, features: Dict) -> Optional[Dict]:
+        """Try scoring with trained CatBoost/XGBoost from MLTrainer."""
+        model_dir = os.getenv("ML_MODEL_DIR", "/tmp/oniquant_models/")
+        for model_name in ["catboost_model.pkl", "xgboost_model.pkl"]:
+            model_path = os.path.join(model_dir, model_name)
+            if os.path.exists(model_path):
+                try:
+                    with open(model_path, "rb") as f:
+                        data = pickle.load(f)
+                    model = data["model"]
+                    feat_names = data["feature_names"]
+                    model_type = data.get("model_type", "gradient_boosting")
+
+                    X = np.array([[features.get(f, 0.0) for f in feat_names]])
+                    proba = model.predict_proba(X)[0]
+                    score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+
+                    return {
+                        "ml_score": round(score, 4),
+                        "ml_features": features,
+                        "ml_method": model_type,
+                    }
+                except Exception as e:
+                    logger.debug(f"Gradient boosting scoring failed: {e}")
+        return None
 
     def _extract_features(
         self, signal_data: Dict, enrichment: Dict, desk_id: str
