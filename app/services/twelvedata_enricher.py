@@ -2,7 +2,12 @@
 TwelveData Enrichment Service
 Fetches market context for each signal: ATR, RSI, volume profile,
 volatility regime, session detection, Hurst exponent, and intermarket data.
+
+Includes per-symbol enrichment cache (60s TTL) to avoid blowing
+TwelveData's 55 req/min rate limit when multiple desks enrich the
+same symbol within a single signal burst.
 """
+import time
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
@@ -16,25 +21,55 @@ logger = logging.getLogger("TradingSystem.Enricher")
 
 BASE_URL = "https://api.twelvedata.com"
 
+# ── Per-symbol enrichment cache (60s TTL) ──
+# Prevents duplicate TwelveData calls when the same symbol is enriched
+# for multiple desks within the same signal burst.
+_enrichment_cache: Dict[str, dict] = {}
+CACHE_TTL_SECONDS = 60
+
 # TwelveData symbol mapping (our internal → TwelveData format)
-TD_SYMBOLS = {
+SYMBOL_MAP = {
+    "US30": "DJI",
+    "US500": "SPX",
+    "US100": "NDX",
+    "NAS100": "NDX",
+    "GER40": "DAX",
+    "UK100": "UKX",
+    "JPN225": "NI225",
+    "XAUUSD": "XAU/USD",
+    "XAGUSD": "XAG/USD",
+    "BTCUSD": "BTC/USD",
+    "ETHUSD": "ETH/USD",
+    "SOLUSD": "SOL/USD",
     "EURUSD": "EUR/USD",
-    "USDJPY": "USD/JPY",
     "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
     "USDCHF": "USD/CHF",
     "AUDUSD": "AUD/USD",
     "USDCAD": "USD/CAD",
     "NZDUSD": "NZD/USD",
+    "EURGBP": "EUR/GBP",
     "EURJPY": "EUR/JPY",
     "GBPJPY": "GBP/JPY",
     "AUDJPY": "AUD/JPY",
-    "XAUUSD": "XAU/USD",
-    "BTCUSD": "BTC/USD",
-    "ETHUSD": "ETH/USD",
-    "US30": "DJI",
-    "US100": "IXIC",
-    "NAS100": "IXIC",
-    "TSLA": "TSLA",
+    "NZDJPY": "NZD/JPY",
+    "EURAUD": "EUR/AUD",
+    "EURNZD": "EUR/NZD",
+    "GBPAUD": "GBP/AUD",
+    "GBPNZD": "GBP/NZD",
+    "GBPCAD": "GBP/CAD",
+    "EURCAD": "EUR/CAD",
+    "AUDCAD": "AUD/CAD",
+    "AUDNZD": "AUD/NZD",
+    "CADCHF": "CAD/CHF",
+    "CADJPY": "CAD/JPY",
+    "CHFJPY": "CHF/JPY",
+    "NZDCAD": "NZD/CAD",
+    "EURCHF": "EUR/CHF",
+    "GBPCHF": "GBP/CHF",
+    "AUDCHF": "AUD/CHF",
+    "NZDCHF": "NZD/CHF",
+    "WTIUSD": "WTI/USD",
 }
 
 # Intermarket instruments for macro context
@@ -64,12 +99,21 @@ class TwelveDataEnricher:
         """
         Fetch market context for a signal. Returns enrichment dict.
         Falls back to empty/default values if API unavailable.
+        Uses per-symbol cache (60s TTL) to avoid duplicate API calls.
         """
+        # ── Cache check ──
+        now = time.time()
+        cached = _enrichment_cache.get(symbol)
+        if cached and (now - cached["timestamp"]) < CACHE_TTL_SECONDS:
+            age = now - cached["timestamp"]
+            logger.info(f"Enrichment cache HIT for {symbol} (age: {age:.1f}s)")
+            return cached["data"]
+
         if not self.api_key:
             logger.warning("No TwelveData API key — returning defaults")
             return self._default_enrichment(symbol, price)
 
-        td_symbol = TD_SYMBOLS.get(symbol, symbol)
+        td_symbol = SYMBOL_MAP.get(symbol, symbol)
         td_interval = TD_INTERVALS.get(timeframe, "1h")
 
         enrichment = {}
@@ -167,6 +211,9 @@ class TwelveDataEnricher:
             f"Session={enrichment.get('active_session')} "
             f"Hurst={enrichment.get('hurst_exponent')}"
         )
+
+        # ── Cache store ──
+        _enrichment_cache[symbol] = {"data": enrichment, "timestamp": time.time()}
 
         return enrichment
 
@@ -549,6 +596,14 @@ class TwelveDataEnricher:
 
         Saves 3-4 TwelveData API credits and ~2 seconds per signal.
         """
+        # ── Cache check ──
+        now = time.time()
+        cached = _enrichment_cache.get(symbol)
+        if cached and (now - cached["timestamp"]) < CACHE_TTL_SECONDS:
+            age = now - cached["timestamp"]
+            logger.info(f"Enrichment cache HIT for {symbol} (age: {age:.1f}s)")
+            return cached["data"]
+
         enrichment = {}
 
         try:
@@ -644,6 +699,9 @@ class TwelveDataEnricher:
             f"Confluence={enrichment.get('mse_confluence')} "
             f"[intermarket-only fetch — saved ~4 TD credits]"
         )
+
+        # ── Cache store ──
+        _enrichment_cache[symbol] = {"data": enrichment, "timestamp": time.time()}
 
         return enrichment
 

@@ -338,6 +338,18 @@ else:
     )
 
 
+# ─── Legacy EA stubs — silence 404 spam from external polling ───
+
+@app.get("/api/trades/pending")
+async def get_pending_trades():
+    return []
+
+
+@app.get("/api/trades/exits")
+async def get_exit_commands():
+    return []
+
+
 # ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───
 
 @app.get("/test-alpha-strike", response_class=ORJSONResponse)

@@ -28,17 +28,21 @@ CRYPTO = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "LINKUSD"}
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 TD_MAP = {
-    "EURUSD": "EUR/USD", "USDJPY": "USD/JPY", "GBPUSD": "GBP/USD",
-    "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
-    "NZDUSD": "NZD/USD", "EURJPY": "EUR/JPY", "GBPJPY": "GBP/JPY",
-    "AUDJPY": "AUD/JPY", "EURGBP": "EUR/GBP", "EURAUD": "EUR/AUD",
-    "GBPAUD": "GBP/AUD", "EURCHF": "EUR/CHF", "CADJPY": "CAD/JPY",
-    "NZDJPY": "NZD/JPY", "GBPCAD": "GBP/CAD", "AUDCAD": "AUD/CAD",
-    "AUDNZD": "AUD/NZD", "CHFJPY": "CHF/JPY", "EURNZD": "EUR/NZD",
-    "GBPNZD": "GBP/NZD",
+    "US30": "DJI", "US500": "SPX", "US100": "NDX", "NAS100": "NDX",
+    "GER40": "DAX", "UK100": "UKX", "JPN225": "NI225",
     "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD",
-    "WTIUSD": "CL", "XCUUSD": "COPPER",
-    "US30": "DJI", "US100": "IXIC", "NAS100": "IXIC",
+    "WTIUSD": "WTI/USD", "XCUUSD": "COPPER",
+    "BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD", "SOLUSD": "SOL/USD",
+    "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
+    "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
+    "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP", "EURJPY": "EUR/JPY",
+    "GBPJPY": "GBP/JPY", "AUDJPY": "AUD/JPY", "NZDJPY": "NZD/JPY",
+    "EURAUD": "EUR/AUD", "EURNZD": "EUR/NZD", "GBPAUD": "GBP/AUD",
+    "GBPNZD": "GBP/NZD", "GBPCAD": "GBP/CAD", "EURCAD": "EUR/CAD",
+    "AUDCAD": "AUD/CAD", "AUDNZD": "AUD/NZD", "CADCHF": "CAD/CHF",
+    "CADJPY": "CAD/JPY", "CHFJPY": "CHF/JPY", "NZDCAD": "NZD/CAD",
+    "EURCHF": "EUR/CHF", "GBPCHF": "GBP/CHF", "AUDCHF": "AUD/CHF",
+    "NZDCHF": "NZD/CHF",
     "TSLA": "TSLA", "AAPL": "AAPL", "MSFT": "MSFT",
     "NVDA": "NVDA", "AMZN": "AMZN", "META": "META",
     "GOOGL": "GOOGL", "NFLX": "NFLX", "AMD": "AMD",
@@ -83,9 +87,7 @@ class PriceService:
         """TwelveData single-symbol price fetch."""
         if not TWELVEDATA_API_KEY:
             return None
-        td_sym = TD_MAP.get(symbol)
-        if not td_sym:
-            return None
+        td_sym = TD_MAP.get(symbol, symbol)
         try:
             resp = await self.client.get(
                 "https://api.twelvedata.com/price",
