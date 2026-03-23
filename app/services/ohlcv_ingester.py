@@ -31,8 +31,8 @@ TD_MAP = {
     "NZDCHF": "NZD/CHF", "CADCHF": "CAD/CHF", "NZDCAD": "NZD/CAD",
     "EURCAD": "EUR/CAD",
     "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD",
-    "WTIUSD": "CL", "US30": "DJI", "US100": "IXIC",
-    "NAS100": "IXIC", "GER40": "DAX", "UK100": "FTSE",
+    "WTIUSD": "WTI/USD", "US30": "DIA", "US100": "QQQ",
+    "NAS100": "QQQ", "GER40": "DAX", "UK100": "FTSE",
     "JPN225": "N225",
 }
 

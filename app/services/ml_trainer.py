@@ -394,10 +394,10 @@ class MLTrainer:
                     feature_names = data.get("feature_names", [])
 
                     return (
-                        f"<b>ML Model Report</b>\n"
-                        f"Model: <code>{model_type}</code>\n"
-                        f"Trained: <code>{saved_at}</code>\n"
-                        f"Features: <code>{len(feature_names)}</code>\n"
+                        f"ML Model Report\n"
+                        f"Model: {model_type}\n"
+                        f"Trained: {saved_at}\n"
+                        f"Features: {len(feature_names)}\n"
                     )
                 except Exception:
                     pass

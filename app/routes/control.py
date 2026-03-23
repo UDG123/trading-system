@@ -93,7 +93,7 @@ async def pause_desk(
 
     telegram = _get_telegram()
     await telegram.send_message(
-        f"⏸️ <b>{desk_id}</b> paused for {hours} hours via API."
+        f"⏸️ {desk_id} paused for {hours} hours via API."
     )
 
     return {
@@ -120,7 +120,7 @@ async def resume_desk(
         db.commit()
 
     telegram = _get_telegram()
-    await telegram.send_message(f"▶️ <b>{desk_id}</b> resumed via API.")
+    await telegram.send_message(f"▶️ {desk_id} resumed via API.")
 
     return {"status": "resumed", "desk_id": desk_id}
 
