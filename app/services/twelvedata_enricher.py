@@ -41,6 +41,8 @@ SYMBOL_MAP = {
     "BTCUSD": "BTC/USD",
     "ETHUSD": "ETH/USD",
     "SOLUSD": "SOL/USD",
+    "XRPUSD": "XRP/USD",
+    "LINKUSD": "LINK/USD",
     "EURUSD": "EUR/USD",
     "GBPUSD": "GBP/USD",
     "USDJPY": "USD/JPY",
