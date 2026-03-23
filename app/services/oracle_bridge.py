@@ -12,7 +12,7 @@ class OracleBridge:
         hurst_val = data.get('hurst', 0)
 
         return (
-            f"OniQuant v6.0 | {data['desk_id']}\n"
+            f"OniQuant v6.1 | {data['desk_id']}\n"
             f"━━━━━━━━━━━━━━\n"
             f"STRENGTH: {bar} ({data['ml_score']}/4)\n"
             f"REGIME: {regime} (H: {hurst_val:.2f})\n"

@@ -1,5 +1,5 @@
 """
-OniQuant v6.0.1 — Redis Stream Consumer & Shadow Sim Engine
+OniQuant v6.1 — Redis Stream Consumer & Signal Generator
 
 Persistent background process that consumes from the `oniquant_alerts`
 Redis Stream and runs each signal through the pipeline.
@@ -149,7 +149,7 @@ async def generate_daily_digest(db_session_factory) -> str:
             f"└─────────────────────\n"
             f"\n"
             f"  ⚙️ Hurst Chop Zone: H < {HURST_CHOP_THRESHOLD}\n"
-            f"  🤖 Zero-Key Oracle v6.0.1\n"
+            f"  🤖 Zero-Key Oracle v6.1.0\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -437,7 +437,7 @@ async def main():
     signal_mod.signal(signal_mod.SIGTERM, _handle_signal)
 
     logger.info("=" * 60)
-    logger.info("OniQuant v6.0.1 — Shadow Sim Engine Worker")
+    logger.info("OniQuant v6.1.0 — Signal Generator Worker")
     logger.info(f"Stream: {STREAM_KEY} | Group: {CONSUMER_GROUP}")
     logger.info(f"Consumer: {CONSUMER_NAME}")
     logger.info(f"Hurst Chop Zone: H < {HURST_CHOP_THRESHOLD}")

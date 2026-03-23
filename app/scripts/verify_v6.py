@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OniQuant v6.0 Post-Deploy Verification Script
+OniQuant v6.1 Post-Deploy Verification Script
 
 Run from anywhere with:
   python -m app.scripts.verify_v6 https://trading-system-production-4566.up.railway.app <WEBHOOK_SECRET>
@@ -397,7 +397,7 @@ if __name__ == "__main__":
     base_url = base_url.rstrip("/")
 
     print("=" * 56)
-    print("  OniQuant v6.0 — Post-Deploy Verification")
+    print("  OniQuant v6.1 — Post-Deploy Verification")
     print(f"  Target: {base_url}")
     print(f"  Secret: {'***' + secret[-4:] if secret else '(none — webhook tests skipped)'}")
     print("=" * 56)
@@ -419,7 +419,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 56)
     print(f"  RESULTS: {passed} passed / {failed} failed / {warnings} warnings")
     if failed == 0:
-        print("  🎉 ALL CHECKS PASSED — v6.0 is live!")
+        print("  🎉 ALL CHECKS PASSED — v6.1 is live!")
     elif failed <= 2:
         print("  ⚠️  Minor issues — review warnings above")
     else:

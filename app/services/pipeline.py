@@ -1,11 +1,12 @@
 """
-Signal Processing Pipeline — Shadow Simulation Mode
+Signal Processing Pipeline — Signal Generator Mode (v6.1)
 Orchestrates the full pipeline for validated signals:
-Enrichment → Hurst Filter → ML Scoring → Consensus Scoring → Claude CTO → Sim Execution
+Enrichment → Hurst Filter → ML Scoring → Consensus Scoring → Claude CTO → Telegram Alert
 
-ALL CTO-approved signals are recorded as SIM_OPEN trades.
+CTO-approved signals: log as SIM_OPEN + send Telegram alert.
 HOLD and SKIP signals are logged and skipped.
 CHOP signals (Hurst < 0.52) are skipped automatically.
+No execution layer — output is Telegram alerts ONLY.
 
 Runs asynchronously after webhook logs the validated signal.
 """
@@ -386,12 +387,9 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 "risk_flags": risk_flags,
             }
 
-            # Desk index for unique ticket generation
-            desk_idx = desks.index(desk_id) if desk_id in desks else 0
-
             if decision.get("decision") in ("EXECUTE", "REDUCE"):
-                # ── 9. CTO APPROVED → Create sim trade record ──
-                signal.status = "EXECUTING"
+                # ── 9. CTO APPROVED → Log signal + Telegram alert ──
+                signal.status = "APPROVED"
                 signal.position_size_pct = trade_params.get("risk_pct")
                 signal.desk_id = desk_id
 
@@ -412,14 +410,13 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     account_capital=desk_capital,
                 )
 
-                # ── 9b. Create trade record ──
-                # Unique ticket: 900000 + signal_id * 10 + desk_index
+                # ── 9b. Create trade record (sim only — no execution) ──
                 trade_record = TradeModel(
                     signal_id=signal.id,
                     desk_id=desk_id,
                     symbol=signal_data.get("symbol"),
                     direction=signal_data.get("direction"),
-                    mt5_ticket=900000 + signal.id * 10 + desk_idx,
+                    mt5_ticket=None,
                     entry_price=entry_price,
                     lot_size=lot_size,
                     risk_pct=effective_risk_pct,

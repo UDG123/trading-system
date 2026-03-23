@@ -1,5 +1,5 @@
 """
-OniQuant v6.0.1 — Shadow Sim Engine
+OniQuant v6.1 — Signal Generator
 FastAPI + Redis Stream Ingestor + VirtualBroker (Shadow Sim) + apscheduler
 """
 import os
@@ -115,7 +115,7 @@ async def _auto_report_scheduler():
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
     logger.info("=" * 60)
-    logger.info("AUTONOMOUS TRADING SYSTEM - INITIALIZING")
+    logger.info("OniQuant v6.1 Signal Generator - INITIALIZING")
     logger.info("=" * 60)
 
     # Create tables (import all models first so they register with Base)
@@ -158,7 +158,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
 
-    logger.info("OniQuant v6.0.1 Ingestor ONLINE (uvloop + orjson + Redis Streams + Shadow Sim)")
+    logger.info("OniQuant v6.1.0 Signal Generator ONLINE (uvloop + orjson + Redis Streams)")
     logger.info("=" * 60)
 
     # Start background report scheduler
@@ -309,9 +309,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OniQuant v6.0.1 — Shadow Sim Engine",
-    description="Redis Stream Ingestor + Shadow Pipeline + Virtual Broker + ML Trainer",
-    version="6.0.1",
+    title="OniQuant v6.1 — Signal Generator",
+    description="Pure signal generator: Redis Stream Ingestor + Shadow Pipeline + Telegram Alerts",
+    version="6.1.0",
     lifespan=lifespan,
 )
 
