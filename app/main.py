@@ -224,7 +224,9 @@ async def lifespan(app: FastAPI):
                 logger.debug(f"Equity snapshot error: {e}")
 
         async def _run_sim_exit_checker():
-            """Check sim positions for exit conditions."""
+            """Check sim positions for exit conditions.
+            Uses batch TwelveData call (1 API credit) instead of per-symbol calls.
+            """
             try:
                 from app.services.virtual_broker import VirtualBroker
                 broker = VirtualBroker(SessionLocal)
@@ -240,14 +242,8 @@ async def lifespan(app: FastAPI):
                     )
                     if open_syms:
                         ps = PriceService()
-                        prices = {}
-                        for (sym,) in open_syms:
-                            try:
-                                p = await ps.get_price(sym)
-                                if p:
-                                    prices[sym] = p
-                            except Exception:
-                                pass
+                        symbols = [sym for (sym,) in open_syms]
+                        prices = await ps.get_prices_batch(symbols)
                         await ps.close()
                         if prices:
                             closed = await broker.check_exits(db, prices)

@@ -1,15 +1,19 @@
 """
-PriceService — On-Demand 2-Provider Price Fetch
+PriceService — On-Demand Price Fetch (TwelveData + Binance)
 Used by the pipeline to get a live market price at signal entry time.
 NOT a continuous feed. Single get_price() call per signal.
 
+Also provides get_prices_batch() for the sim exit checker to fetch
+all open-position prices in a SINGLE TwelveData API call.
+
 Routing:
-  Crypto         → Binance REST (no key, 1 call)
-  Everything else → TwelveData (1 credit)
+  Single price: Crypto → Binance REST (no key, 1 call)
+                Everything else → TwelveData (1 credit)
+  Batch prices: ALL symbols → TwelveData multi-symbol (1 credit total)
 """
 import os
 import logging
-from typing import Optional
+from typing import Optional, Dict, List
 
 import httpx
 
@@ -33,6 +37,7 @@ TD_MAP = {
     "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD",
     "WTIUSD": "WTI/USD", "XCUUSD": "COPPER",
     "BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD", "SOLUSD": "SOL/USD",
+    "XRPUSD": "XRP/USD", "LINKUSD": "LINK/USD",
     "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
     "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
     "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP", "EURJPY": "EUR/JPY",
@@ -78,6 +83,65 @@ class PriceService:
             return await self._binance(sym)
         else:
             return await self._twelvedata(sym)
+
+    async def get_prices_batch(self, symbols: List[str]) -> Dict[str, float]:
+        """
+        Fetch prices for multiple symbols in a SINGLE TwelveData API call.
+        Uses the multi-symbol /price endpoint: ?symbol=EUR/USD,GBP/USD,...
+
+        Returns dict mapping original symbol → price (only successful fetches).
+        Costs 1 API credit regardless of how many symbols are requested.
+        """
+        if not symbols or not TWELVEDATA_API_KEY:
+            return {}
+
+        # Build mapping: original symbol → TwelveData symbol
+        td_to_original: Dict[str, str] = {}
+        for sym in symbols:
+            td_sym = TD_MAP.get(sym.upper(), sym.upper())
+            td_to_original[td_sym] = sym
+
+        td_symbols_csv = ",".join(td_to_original.keys())
+
+        try:
+            resp = await self.client.get(
+                "https://api.twelvedata.com/price",
+                params={"symbol": td_symbols_csv, "apikey": TWELVEDATA_API_KEY},
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Batch price fetch HTTP {resp.status_code}")
+                return {}
+
+            data = resp.json()
+
+            prices: Dict[str, float] = {}
+
+            if len(td_to_original) == 1:
+                # Single symbol: TwelveData returns {"price": "1.0850"}
+                td_sym = next(iter(td_to_original))
+                original_sym = td_to_original[td_sym]
+                if data.get("status") != "error" and "price" in data:
+                    prices[original_sym] = float(data["price"])
+            else:
+                # Multiple symbols: {"EUR/USD": {"price": "1.0850"}, ...}
+                for td_sym, original_sym in td_to_original.items():
+                    entry = data.get(td_sym, {})
+                    if isinstance(entry, dict) and "price" in entry:
+                        try:
+                            prices[original_sym] = float(entry["price"])
+                        except (ValueError, TypeError):
+                            pass
+                    # Skip symbols that returned errors ({"code": 400, ...})
+
+            logger.info(
+                f"Sim exit checker: fetched {len(prices)} prices in 1 batch call "
+                f"({len(td_to_original)} requested)"
+            )
+            return prices
+
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            logger.warning(f"Batch price fetch failed: {e}")
+            return {}
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # PROVIDERS
