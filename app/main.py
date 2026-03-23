@@ -118,6 +118,10 @@ async def lifespan(app: FastAPI):
     from app.models.trade import Trade  # noqa
     from app.models.desk_state import DeskState  # noqa
     from app.models.ml_trade_log import MLTradeLog  # noqa — ensure table created
+    from app.models.shadow_signal import ShadowSignal  # noqa — shadow sim engine
+    from app.models.sim_models import (  # noqa — simulation environment
+        SimProfile, SimOrder, SimPosition, SimEquitySnapshot, SpreadReference,
+    )
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables verified (including ml_training_data)")
 
