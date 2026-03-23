@@ -23,7 +23,11 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.telegram import router as telegram_router
 from app.routes.control import router as control_router
 from app.routes.ml_export import router as ml_export_router
-from app.routes.simulation import router as sim_router
+
+try:
+    from app.routes.simulation import router as sim_router
+except Exception as _sim_err:
+    sim_router = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,12 +123,15 @@ async def lifespan(app: FastAPI):
     from app.models.trade import Trade  # noqa
     from app.models.desk_state import DeskState  # noqa
     from app.models.ml_trade_log import MLTradeLog  # noqa — ensure table created
-    from app.models.shadow_signal import ShadowSignal  # noqa — shadow sim engine
-    from app.models.sim_models import (  # noqa — simulation environment
-        SimProfile, SimOrder, SimPosition, SimEquitySnapshot, SpreadReference,
-    )
+    try:
+        from app.models.shadow_signal import ShadowSignal  # noqa — shadow sim engine
+        from app.models.sim_models import (  # noqa — simulation environment
+            SimProfile, SimOrder, SimPosition, SimEquitySnapshot, SpreadReference,
+        )
+    except Exception as e:
+        logger.error(f"Shadow sim models failed to import: {e}")
     Base.metadata.create_all(bind=engine)
-    logger.info("Database tables verified (including ml_training_data)")
+    logger.info("Database tables verified")
 
     # Verify DB connection
     if check_db_connection():
@@ -188,97 +195,97 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     # ── Shadow Sim Engine Scheduled Jobs ──
-    from apscheduler.triggers.interval import IntervalTrigger
+    try:
+        from apscheduler.triggers.interval import IntervalTrigger
 
-    async def _run_triple_barrier_labeler():
-        """Label shadow signals with triple-barrier outcomes."""
-        try:
-            from app.services.triple_barrier_labeler import TripleBarrierLabeler
-            labeler = TripleBarrierLabeler(SessionLocal)
-            count = await labeler.label_batch(limit=500)
-            if count > 0:
-                logger.info(f"Triple-barrier labeled {count} signals")
-        except Exception as e:
-            logger.debug(f"Triple-barrier labeler error: {e}")
-
-    async def _run_equity_snapshot():
-        """Take equity snapshots for all sim profiles."""
-        try:
-            from app.services.virtual_broker import VirtualBroker
-            broker = VirtualBroker(SessionLocal)
-            db = SessionLocal()
+        async def _run_triple_barrier_labeler():
+            """Label shadow signals with triple-barrier outcomes."""
             try:
-                await broker.take_equity_snapshot(db)
-                db.commit()
-            finally:
-                db.close()
-        except Exception as e:
-            logger.debug(f"Equity snapshot error: {e}")
+                from app.services.triple_barrier_labeler import TripleBarrierLabeler
+                labeler = TripleBarrierLabeler(SessionLocal)
+                count = await labeler.label_batch(limit=500)
+                if count > 0:
+                    logger.info(f"Triple-barrier labeled {count} signals")
+            except Exception as e:
+                logger.debug(f"Triple-barrier labeler error: {e}")
 
-    async def _run_sim_exit_checker():
-        """Check sim positions for exit conditions."""
-        try:
-            from app.services.virtual_broker import VirtualBroker
-            broker = VirtualBroker(SessionLocal)
-            db = SessionLocal()
+        async def _run_equity_snapshot():
+            """Take equity snapshots for all sim profiles."""
             try:
-                # Get current prices for all symbols with open positions
-                from app.services.price_service import PriceService
-                from app.models.sim_models import SimPosition
-                open_syms = (
-                    db.query(SimPosition.symbol)
-                    .filter(SimPosition.status.in_(["OPEN", "PARTIAL"]))
-                    .distinct()
-                    .all()
-                )
-                if open_syms:
-                    ps = PriceService()
-                    prices = {}
-                    for (sym,) in open_syms:
-                        try:
-                            p = await ps.get_price(sym)
-                            if p:
-                                prices[sym] = p
-                        except Exception:
-                            pass
-                    await ps.close()
-                    if prices:
-                        closed = await broker.check_exits(db, prices)
-                        db.commit()
-                        if closed:
-                            logger.debug(f"Sim exit checker: {len(closed)} positions closed")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.debug(f"Sim exit checker error: {e}")
+                from app.services.virtual_broker import VirtualBroker
+                broker = VirtualBroker(SessionLocal)
+                db = SessionLocal()
+                try:
+                    await broker.take_equity_snapshot(db)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Equity snapshot error: {e}")
 
-    _scheduler.add_job(
-        _run_triple_barrier_labeler,
-        trigger=IntervalTrigger(minutes=30),
-        id="triple_barrier_labeler",
-        name="Triple-Barrier Labeler (every 30 min)",
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _run_equity_snapshot,
-        trigger=IntervalTrigger(minutes=15),
-        id="equity_snapshot",
-        name="Sim Equity Snapshot (every 15 min)",
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _run_sim_exit_checker,
-        trigger=IntervalTrigger(seconds=60),
-        id="sim_exit_checker",
-        name="Sim Exit Checker (every 60s)",
-        replace_existing=True,
-    )
+        async def _run_sim_exit_checker():
+            """Check sim positions for exit conditions."""
+            try:
+                from app.services.virtual_broker import VirtualBroker
+                broker = VirtualBroker(SessionLocal)
+                db = SessionLocal()
+                try:
+                    from app.services.price_service import PriceService
+                    from app.models.sim_models import SimPosition
+                    open_syms = (
+                        db.query(SimPosition.symbol)
+                        .filter(SimPosition.status.in_(["OPEN", "PARTIAL"]))
+                        .distinct()
+                        .all()
+                    )
+                    if open_syms:
+                        ps = PriceService()
+                        prices = {}
+                        for (sym,) in open_syms:
+                            try:
+                                p = await ps.get_price(sym)
+                                if p:
+                                    prices[sym] = p
+                            except Exception:
+                                pass
+                        await ps.close()
+                        if prices:
+                            closed = await broker.check_exits(db, prices)
+                            db.commit()
+                            if closed:
+                                logger.debug(f"Sim exit checker: {len(closed)} positions closed")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Sim exit checker error: {e}")
+
+        _scheduler.add_job(
+            _run_triple_barrier_labeler,
+            trigger=IntervalTrigger(minutes=30),
+            id="triple_barrier_labeler",
+            name="Triple-Barrier Labeler (every 30 min)",
+            replace_existing=True,
+        )
+        _scheduler.add_job(
+            _run_equity_snapshot,
+            trigger=IntervalTrigger(minutes=15),
+            id="equity_snapshot",
+            name="Sim Equity Snapshot (every 15 min)",
+            replace_existing=True,
+        )
+        _scheduler.add_job(
+            _run_sim_exit_checker,
+            trigger=IntervalTrigger(seconds=60),
+            id="sim_exit_checker",
+            name="Sim Exit Checker (every 60s)",
+            replace_existing=True,
+        )
+        logger.info("Shadow sim jobs registered: labeler 30min | equity 15min | exit-check 60s")
+    except Exception as e:
+        logger.error(f"Shadow sim scheduler jobs failed to register: {e}")
 
     _scheduler.start()
-    logger.info(
-        "APScheduler started: Daily PnL Digest at 17:00 America/Toronto | "
-        "Triple-Barrier Labeler 30min | Equity Snapshot 15min | Exit Checker 60s"
-    )
+    logger.info("APScheduler started: Daily PnL Digest at 17:00 America/Toronto")
 
     yield
 
@@ -323,7 +330,12 @@ app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])
-app.include_router(sim_router, prefix="/api", tags=["Simulation"])
+if sim_router is not None:
+    app.include_router(sim_router, prefix="/api", tags=["Simulation"])
+else:
+    logging.getLogger("TradingSystem").error(
+        f"Simulation router failed to load: {_sim_err}"
+    )
 
 
 # ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───
