@@ -386,3 +386,68 @@ async def get_signal(signal_id: int):
         }
     finally:
         db.close()
+
+
+@router.get("/test-signal", response_class=ORJSONResponse)
+async def test_synthetic_signal(request: Request):
+    """
+    GET endpoint to fire a synthetic signal through the full Redis pipeline.
+    Hit from mobile browser: /api/test-signal
+    """
+    import time
+    synthetic_payload = {
+        "alert": "Bullish Confirmation Signal",
+        "ticker": "XAUUSD",
+        "exchange": "OANDA",
+        "tf": "15",
+        "close": 3020.50,
+        "volume": 1500,
+        "bartime": str(int(time.time())),
+        "tp1": 3050.00,
+        "tp2": 3070.00,
+        "sl1": 3005.00,
+        "sl2": 2995.00,
+        "smart_trail": 3012.00,
+    }
+
+    # Simulate a real POST to the webhook by calling _ingest directly
+    # We need to create a fake request-like object, so instead we just
+    # push directly to Redis after running the same normalization
+    redis = _get_redis()
+
+    payload = _map_fields(dict(synthetic_payload))
+    payload = _clean_na(payload)
+
+    raw_alert = payload.get("alert_type", "unknown")
+    alert_type = _normalize_alert_type(raw_alert)
+    payload["alert_type"] = alert_type
+
+    symbol_raw = (payload.get("symbol") or "XAUUSD").strip().upper()
+    exchange = payload.get("exchange", "OANDA")
+    lookup_key = f"{exchange}:{symbol_raw}" if exchange else symbol_raw
+    from app.config import SYMBOL_ALIASES, get_desk_for_symbol
+    symbol_normalized = SYMBOL_ALIASES.get(lookup_key, symbol_raw.replace("/", ""))
+    payload["symbol"] = symbol_raw
+    payload["symbol_normalized"] = symbol_normalized
+
+    if "timeframe" in payload:
+        payload["timeframe"] = str(payload["timeframe"]).strip().upper()
+
+    direction = _direction(alert_type)
+    payload["direction"] = direction
+
+    desks = get_desk_for_symbol(symbol_normalized)
+    payload["desks_matched"] = desks
+    payload["webhook_latency_ms"] = 0
+
+    stream_payload = orjson.dumps(payload)
+    await redis.xadd(STREAM_KEY, {"payload": stream_payload})
+
+    return {
+        "status": "test_signal_sent",
+        "symbol": symbol_normalized,
+        "alert_type": alert_type,
+        "direction": direction,
+        "desks_matched": desks,
+        "message": "Check /api/shadow/stats in 10 seconds",
+    }
