@@ -23,6 +23,7 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.telegram import router as telegram_router
 from app.routes.control import router as control_router
 from app.routes.ml_export import router as ml_export_router
+from app.routes.simulation import router as sim_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -186,8 +187,98 @@ async def lifespan(app: FastAPI):
         name="Daily PnL Digest (5 PM Toronto)",
         replace_existing=True,
     )
+    # ── Shadow Sim Engine Scheduled Jobs ──
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    async def _run_triple_barrier_labeler():
+        """Label shadow signals with triple-barrier outcomes."""
+        try:
+            from app.services.triple_barrier_labeler import TripleBarrierLabeler
+            labeler = TripleBarrierLabeler(SessionLocal)
+            count = await labeler.label_batch(limit=500)
+            if count > 0:
+                logger.info(f"Triple-barrier labeled {count} signals")
+        except Exception as e:
+            logger.debug(f"Triple-barrier labeler error: {e}")
+
+    async def _run_equity_snapshot():
+        """Take equity snapshots for all sim profiles."""
+        try:
+            from app.services.virtual_broker import VirtualBroker
+            broker = VirtualBroker(SessionLocal)
+            db = SessionLocal()
+            try:
+                await broker.take_equity_snapshot(db)
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"Equity snapshot error: {e}")
+
+    async def _run_sim_exit_checker():
+        """Check sim positions for exit conditions."""
+        try:
+            from app.services.virtual_broker import VirtualBroker
+            broker = VirtualBroker(SessionLocal)
+            db = SessionLocal()
+            try:
+                # Get current prices for all symbols with open positions
+                from app.services.price_service import PriceService
+                from app.models.sim_models import SimPosition
+                open_syms = (
+                    db.query(SimPosition.symbol)
+                    .filter(SimPosition.status.in_(["OPEN", "PARTIAL"]))
+                    .distinct()
+                    .all()
+                )
+                if open_syms:
+                    ps = PriceService()
+                    prices = {}
+                    for (sym,) in open_syms:
+                        try:
+                            p = await ps.get_price(sym)
+                            if p:
+                                prices[sym] = p
+                        except Exception:
+                            pass
+                    await ps.close()
+                    if prices:
+                        closed = await broker.check_exits(db, prices)
+                        db.commit()
+                        if closed:
+                            logger.debug(f"Sim exit checker: {len(closed)} positions closed")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"Sim exit checker error: {e}")
+
+    _scheduler.add_job(
+        _run_triple_barrier_labeler,
+        trigger=IntervalTrigger(minutes=30),
+        id="triple_barrier_labeler",
+        name="Triple-Barrier Labeler (every 30 min)",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _run_equity_snapshot,
+        trigger=IntervalTrigger(minutes=15),
+        id="equity_snapshot",
+        name="Sim Equity Snapshot (every 15 min)",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _run_sim_exit_checker,
+        trigger=IntervalTrigger(seconds=60),
+        id="sim_exit_checker",
+        name="Sim Exit Checker (every 60s)",
+        replace_existing=True,
+    )
+
     _scheduler.start()
-    logger.info("APScheduler started: Daily PnL Digest at 17:00 America/Toronto")
+    logger.info(
+        "APScheduler started: Daily PnL Digest at 17:00 America/Toronto | "
+        "Triple-Barrier Labeler 30min | Equity Snapshot 15min | Exit Checker 60s"
+    )
 
     yield
 
@@ -232,6 +323,7 @@ app.include_router(dashboard_router, prefix="/api", tags=["Dashboard"])
 app.include_router(telegram_router, prefix="/api", tags=["Telegram"])
 app.include_router(control_router, prefix="/api", tags=["Control"])
 app.include_router(ml_export_router, prefix="/api", tags=["ML Data"])
+app.include_router(sim_router, prefix="/api", tags=["Simulation"])
 
 
 # ─── Test Alpha Strike — verify dual-routing + Master Mix layout from mobile ───

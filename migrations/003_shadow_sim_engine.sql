@@ -321,3 +321,22 @@ INSERT INTO spread_reference (symbol, asset_class, base_spread_pips, commission_
     ('AAPL',   'equity', 0.02, 1.0),
     ('TSLA',   'equity', 0.05, 1.0)
 ON CONFLICT (symbol) DO NOTHING;
+
+
+-- ──────────────────────────────────────────────────────────────
+-- 7. ohlcv_1m — 1-minute OHLCV data for triple-barrier labeling
+--    and backtesting
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ohlcv_1m (
+    time            TIMESTAMPTZ NOT NULL,
+    symbol          VARCHAR(20) NOT NULL,
+    open            DOUBLE PRECISION,
+    high            DOUBLE PRECISION,
+    low             DOUBLE PRECISION,
+    close           DOUBLE PRECISION,
+    volume          DOUBLE PRECISION,
+    PRIMARY KEY (time, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS ix_ohlcv_1m_symbol_time
+    ON ohlcv_1m (symbol, time);

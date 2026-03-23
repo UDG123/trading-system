@@ -29,6 +29,10 @@ import redis.asyncio as aioredis
 
 from app.config import REDIS_URL, DESKS
 
+# ─── Shadow Sim Engine Mode ───
+SHADOW_MODE = os.getenv("SHADOW_MODE", "COLLECT")  # COLLECT | ML_GATE | DISABLED
+SHADOW_TRADE_ALL = os.getenv("SHADOW_TRADE_ALL", "true").lower() in ("true", "1")
+
 logger = logging.getLogger("TradingSystem.Worker")
 
 # ─── Stream / Consumer Group config ───
@@ -461,6 +465,24 @@ class VerificationWorker:
             f"Desks: {desks}"
         )
 
+        # ── Shadow Log — captures EVERYTHING before gates filter ──
+        shadow_id = None
+        if SHADOW_MODE != "DISABLED":
+            try:
+                from app.services.shadow_logger import ShadowLogger
+                shadow_logger = ShadowLogger(self._db_session_factory)
+                db = self._db_session_factory()
+                try:
+                    shadow_id = await shadow_logger.log_signal(
+                        db=db, payload=payload,
+                        desk_id=desks[0] if desks else None,
+                    )
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Shadow logging failed (non-blocking): {e}")
+
         # ── Gate 1: NumPy Hurst (Chop Zone veto — ALL desks) ──
         hurst_result = await self._gate_hurst(symbol)
         if hurst_result.get("rejected"):
@@ -708,6 +730,42 @@ class VerificationWorker:
                 f"PIPELINE #{signal_record.id}: "
                 f"{orjson.dumps({k: v.get('decision', 'N/A') for k, v in result.get('results', {}).items()}).decode()}"
             )
+
+            # ── Shadow: update with post-pipeline data + sim trade ──
+            if shadow_id and SHADOW_MODE != "DISABLED":
+                try:
+                    from app.services.shadow_logger import ShadowLogger
+                    shadow_logger = ShadowLogger(self._db_session_factory)
+                    # Determine if any desk was approved
+                    any_approved = any(
+                        r.get("approved") for r in result.get("results", {}).values()
+                    )
+                    # Get enrichment/scoring from first desk result
+                    first_result = next(iter(result.get("results", {}).values()), {})
+                    shadow_logger.update_post_pipeline(
+                        db, shadow_id,
+                        enrichment=first_result.get("enrichment_summary"),
+                        ml_result={"ml_score": first_result.get("ml_score")},
+                        consensus={"total_score": first_result.get("consensus_score"),
+                                   "tier": first_result.get("consensus_tier")},
+                        decision={"decision": first_result.get("decision"),
+                                  "reasoning": first_result.get("reasoning"),
+                                  "confidence": first_result.get("size_multiplier")},
+                        live_approved=any_approved,
+                    )
+                    db.commit()
+                except Exception as e:
+                    logger.debug(f"Shadow post-pipeline update failed: {e}")
+
+                # Virtual broker sim for ALL signals
+                if shadow_id and SHADOW_TRADE_ALL:
+                    try:
+                        from app.services.virtual_broker import VirtualBroker
+                        broker = VirtualBroker(self._db_session_factory)
+                        await broker.execute_for_all_profiles(db, shadow_id)
+                        db.commit()
+                    except Exception as e:
+                        logger.debug(f"Virtual broker sim failed: {e}")
 
         except Exception as e:
             logger.error(f"Execute & broadcast failed: {e}", exc_info=True)
