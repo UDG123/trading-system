@@ -16,7 +16,7 @@ from fastapi.responses import ORJSONResponse
 # Install uvloop as the default event loop policy (before any loop creation)
 uvloop.install()
 
-from app.database import engine, Base, check_db_connection, SessionLocal
+from app.database import engine, Base, check_db_connection, SessionLocal, get_db
 from app.routes.webhook import router as webhook_router
 from app.routes.health import router as health_router
 from app.routes.dashboard import router as dashboard_router
@@ -334,6 +334,60 @@ else:
     )
 
 
+# ─── Read-only query endpoints for MCP / dashboard ───
+
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+
+@app.get("/api/signals/recent", tags=["MCP"])
+async def get_recent_signals(limit: int = 20, db: Session = Depends(get_db)):
+    """Get the most recent signals processed by the pipeline."""
+    rows = db.execute(
+        text(
+            "SELECT id, symbol, alert_type, direction, received_at, "
+            "consensus_score, claude_decision, desk_id, status "
+            "FROM signals ORDER BY received_at DESC LIMIT :limit"
+        ),
+        {"limit": limit},
+    ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+@app.get("/api/stats/pipeline", tags=["MCP"])
+async def get_pipeline_stats(db: Session = Depends(get_db)):
+    """Get pipeline decision statistics for the last 24 hours."""
+    rows = db.execute(
+        text("""
+            SELECT
+                desk_id,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE claude_decision = 'EXECUTE') as executes,
+                COUNT(*) FILTER (WHERE claude_decision = 'SKIP') as skips,
+                ROUND(AVG(consensus_score)::numeric, 1) as avg_consensus
+            FROM signals
+            WHERE received_at > NOW() - INTERVAL '24 hours'
+            GROUP BY desk_id
+        """)
+    ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+@app.get("/api/stats/api-usage", tags=["MCP"])
+async def get_api_usage():
+    """Get TwelveData API usage estimate for the current minute."""
+    try:
+        from app.services.enricher import _enrichment_cache
+        cache_size = len(_enrichment_cache) if hasattr(_enrichment_cache, '__len__') else 0
+    except (ImportError, AttributeError):
+        cache_size = 0
+    return {
+        "cache_entries": cache_size,
+        "note": "Batch exit checker uses 1 credit/min, enrichment uses ~13/signal",
+    }
+
+
 # ─── Legacy EA stubs — silence 404 spam from external polling ───
 
 @app.get("/api/trades/pending")
@@ -387,3 +441,37 @@ async def test_alpha_strike():
         "message_preview": message[:200],
         "test_data": test_data,
     }
+
+
+# ─── MCP Server — expose read-only endpoints as Claude tools ───
+# Must be mounted AFTER all routes are registered so fastapi-mcp discovers them.
+
+from fastapi_mcp import FastApiMCP
+
+mcp = FastApiMCP(
+    app,
+    name="OniQuant Oracle",
+    description="OniQuant v6.1 Signal Generator — query signals, pipeline decisions, sim positions, and system health.",
+    describe_all_responses=True,
+    describe_full_response_schema=True,
+    exclude_operations=[
+        "webhook_path_auth",
+        "webhook_body_auth",
+        "kill_switch",
+        "pause_desk",
+        "resume_desk",
+        "trigger_daily_report",
+        "trigger_weekly_report",
+        "trigger_monthly_report",
+        "telegram_webhook",
+        "start_backtest",
+        "reset_sim_profile",
+        "trigger_ohlcv_ingest",
+        "batch_enrich",
+        "get_pending_trades",
+        "get_exit_commands",
+        "test_alpha_strike",
+        "test_synthetic_signal",
+    ],
+)
+mcp.mount()
