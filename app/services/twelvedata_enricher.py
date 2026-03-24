@@ -29,10 +29,10 @@ CACHE_TTL_SECONDS = 60
 
 # TwelveData symbol mapping (our internal → TwelveData format)
 SYMBOL_MAP = {
-    "US30": "DIA",
-    "US500": "SPY",
-    "US100": "QQQ",
-    "NAS100": "QQQ",
+    "US30": "DJI",       # Dow Jones Industrial Average index (not DIA the ETF)
+    "US500": "SPX",      # S&P 500 index (not SPY the ETF)
+    "US100": "NDX",      # Nasdaq 100 index (not QQQ the ETF)
+    "NAS100": "NDX",     # Same as US100, alternate TradingView name
     "GER40": "DAX",
     "UK100": "UKX",
     "JPN225": "NI225",
