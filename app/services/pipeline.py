@@ -30,7 +30,8 @@ from app.models.signal import Signal
 from app.config import (
     DESKS, CAPITAL_PER_ACCOUNT, PORTFOLIO_CAPITAL_PER_DESK,
     get_pip_info, calculate_lot_size, get_atr_settings,
-    VIX_REGIMES, DESK_DAILY_HARD_STOP_PCT,
+    VIX_REGIMES, DESK_DAILY_HARD_STOP_PCT, DEDUP_WINDOW_MINUTES,
+    get_hurst_thresholds,
 )
 from app.services.ml_data_logger import MLDataLogger
 
@@ -48,11 +49,6 @@ _cto: ClaudeCTO = None
 _risk_filter: HardRiskFilter = None
 _telegram: TelegramBot = None
 _price_service: PriceService = None
-
-# Hurst exponent thresholds
-HURST_CHOP_THRESHOLD = 0.52    # Below this → skip (Chop Zone — 69.5% win rate target)
-HURST_TREND_THRESHOLD = 0.55   # Above this → +2 consensus bonus
-
 
 def _get_services():
     """Lazy-initialize shared service instances."""
@@ -339,25 +335,88 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     logger.warning(f"VIX HALT | {desk_id} | VIX={vix_price:.1f} > {vix_halt}")
                     continue
 
-            # ── 3a. Hurst exponent filter — skip choppy markets ──
+            # ── 3a. Hurst exponent filter — per-asset-class thresholds ──
             hurst = enrichment.get("hurst_exponent")
-            if hurst is not None and hurst < HURST_CHOP_THRESHOLD:
+            hurst_chop, hurst_trend = get_hurst_thresholds(signal.symbol_normalized)
+            if hurst is not None and hurst < hurst_chop:
                 signal.status = "SKIPPED_CHOP"
                 db.commit()
                 await telegram._send_to_system(
                     f"🌊 CHOP FILTER | {signal.symbol_normalized} "
-                    f"| H={hurst:.3f} < {HURST_CHOP_THRESHOLD} "
+                    f"| H={hurst:.3f} < {hurst_chop} "
                     f"| {desk_id} — signal skipped (mean-reverting market)"
                 )
                 logger.info(
                     f"HURST CHOP | {desk_id} | {signal.symbol_normalized} "
-                    f"H={hurst:.3f} — skipping (threshold {HURST_CHOP_THRESHOLD})"
+                    f"H={hurst:.3f} < {hurst_chop} — skipping"
                 )
                 results[desk_id] = {
                     "decision": "SKIP", "approved": False,
-                    "rejection_reason": f"Hurst chop filter: H={hurst:.3f} < {HURST_CHOP_THRESHOLD}",
+                    "rejection_reason": f"Hurst chop filter: H={hurst:.3f} < {hurst_chop}",
                 }
                 continue
+
+            # ── 3c. Intermarket regime adjustments ──
+            intermarket = enrichment.get("intermarket", {})
+
+            # VIX Regime Filter
+            vix_data = intermarket.get("VIX", {})
+            vix_price = float(vix_data.get("price", 0)) if vix_data else 0
+            vix_size_modifier = 1.0
+            if vix_price > 0:
+                if vix_price < 20:
+                    vix_size_modifier = 1.0
+                elif vix_price < 25:
+                    vix_size_modifier = 0.90
+                elif vix_price < 30:
+                    vix_size_modifier = 0.75
+                    if desk_id in ("DESK5_ALTS", "DESK6_EQUITIES"):
+                        vix_size_modifier = 0.50
+                elif vix_price < 35:
+                    vix_size_modifier = 0.50
+                    if desk_id in ("DESK5_ALTS", "DESK6_EQUITIES"):
+                        vix_size_modifier = 0.25
+                else:  # VIX >= 35
+                    if desk_id in ("DESK5_ALTS", "DESK6_EQUITIES"):
+                        signal.status = "REJECTED"
+                        signal.validation_errors = [f"VIX {vix_price:.1f} >= 35 — risk-off halt"]
+                        db.commit()
+                        results[desk_id] = {
+                            "decision": "SKIP", "approved": False,
+                            "rejection_reason": f"VIX halt: {vix_price:.1f}",
+                        }
+                        continue
+                    vix_size_modifier = 0.25
+
+                if vix_size_modifier < 1.0:
+                    logger.info(f"VIX REGIME | {desk_id} | VIX={vix_price:.1f} | Size modifier: {vix_size_modifier}")
+
+            # DXY Directional Filter (FX desks only)
+            dxy_data = intermarket.get("DXY", {})
+            dxy_change = float(dxy_data.get("change_pct", 0)) if dxy_data else 0
+            dxy_adjustment = 0  # consensus score adjustment
+            if abs(dxy_change) > 0.1 and desk_id in ("DESK1_SCALPER", "DESK2_INTRADAY", "DESK3_SWING"):
+                usd_long_when_dxy_falls = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"]
+                usd_long_when_dxy_rises = ["USDJPY", "USDCHF", "USDCAD"]
+                sym = signal_data.get("symbol", "")
+                direction = signal_data.get("direction", "")
+
+                if sym in usd_long_when_dxy_falls:
+                    if (direction == "LONG" and dxy_change < -0.1) or (direction == "SHORT" and dxy_change > 0.1):
+                        dxy_adjustment = +2
+                    elif (direction == "LONG" and dxy_change > 0.15) or (direction == "SHORT" and dxy_change < -0.15):
+                        dxy_adjustment = -2
+                elif sym in usd_long_when_dxy_rises:
+                    if (direction == "LONG" and dxy_change > 0.1) or (direction == "SHORT" and dxy_change < -0.1):
+                        dxy_adjustment = +2
+                    elif (direction == "LONG" and dxy_change < -0.15) or (direction == "SHORT" and dxy_change > 0.15):
+                        dxy_adjustment = -2
+
+                if dxy_adjustment != 0:
+                    logger.info(
+                        f"DXY FILTER | {desk_id} | {sym} {direction} | "
+                        f"DXY change: {dxy_change:+.2f}% | Consensus adj: {dxy_adjustment:+d}"
+                    )
 
             # ── 3b. ML model scoring ──
             signal.status = "SCORING"
@@ -380,13 +439,18 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             )
 
             # ── 5b. Hurst trend bonus — boost consensus in trending markets ──
-            if hurst is not None and hurst > HURST_TREND_THRESHOLD:
+            if hurst is not None and hurst > hurst_trend:
                 consensus["total_score"] += 2
                 consensus.setdefault("components", {})["hurst_trend_bonus"] = 2
                 logger.info(
-                    f"HURST BONUS | {desk_id} | H={hurst:.3f} > {HURST_TREND_THRESHOLD} "
+                    f"HURST BONUS | {desk_id} | H={hurst:.3f} > {hurst_trend} "
                     f"→ +2 consensus (now {consensus['total_score']})"
                 )
+
+            # ── 5c. Apply DXY directional adjustment to consensus ──
+            if dxy_adjustment != 0:
+                consensus["total_score"] += dxy_adjustment
+                consensus.setdefault("breakdown", {})["dxy_direction"] = dxy_adjustment
 
             signal.consensus_score = consensus["total_score"]
 
@@ -398,10 +462,25 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             signal.status = "DECIDING"
             db.commit()
 
-            decision = await cto.decide(
-                signal_data, enrichment, ml_result,
-                consensus, desk_state, firm_risk,
-            )
+            # Pre-screen gate — skip Claude API call for obvious rejects
+            if consensus.get("total_score", 0) < 2:
+                decision = {
+                    "decision": "SKIP",
+                    "size_multiplier": 0.0,
+                    "reasoning": f"Pre-screen: consensus {consensus.get('total_score')} below minimum 2",
+                    "risk_flags": ["low_consensus"],
+                    "confidence": 0.0,
+                    "notes_for_log": "Pre-screen SKIP",
+                }
+                logger.info(
+                    f"PRE-SCREEN SKIP | {desk_id} | {signal.symbol_normalized} | "
+                    f"Consensus {consensus.get('total_score')} < 2 — skipping Claude API call"
+                )
+            else:
+                decision = await cto.decide(
+                    signal_data, enrichment, ml_result,
+                    consensus, desk_state, firm_risk,
+                )
 
             signal.claude_decision = decision["decision"]
             _reasoning = decision.get("reasoning", "")
@@ -425,7 +504,17 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             risk_pct = desk.get("risk_pct", 1.0)
             size_mult = decision.get("size_multiplier", 1.0)
             desk_modifier = desk_state.get("size_modifier", 1.0)
-            effective_risk_pct = min(risk_pct * size_mult * desk_modifier, risk_pct)
+            effective_risk_pct = min(risk_pct * size_mult * desk_modifier * vix_size_modifier, risk_pct)
+
+            # ── 8c. Portfolio-level risk cap ──
+            portfolio_ok, portfolio_msg = risk_filter.check_portfolio_limits(
+                db, signal_data.get("symbol"), signal_data.get("direction"), effective_risk_pct
+            )
+            if not portfolio_ok:
+                risk_flags.append(f"portfolio: {portfolio_msg}")
+                effective_risk_pct *= 0.5
+                logger.warning(f"PORTFOLIO CAP | {portfolio_msg} | Reducing size 50%")
+
             risk_dollars = CAPITAL_PER_ACCOUNT * (effective_risk_pct / 100)
 
             trade_params = {
@@ -454,9 +543,27 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 "ema200": enrichment.get("ema200"),
                 "session": enrichment.get("active_session", "UNKNOWN"),
                 "risk_flags": risk_flags,
+                "vix_size_modifier": vix_size_modifier,
             }
 
             if decision.get("decision") in ("EXECUTE", "REDUCE"):
+                # ── 8b. Check if signal should be parked for pullback entry ──
+                from app.services.pending_engine import PendingEngine
+                _pending_engine = PendingEngine()
+                if _pending_engine.should_park(signal_data, enrichment, decision):
+                    pending_id = await _pending_engine.park_signal(
+                        db, signal.id, signal_data, enrichment, decision, desk_id,
+                    )
+                    signal.status = "PENDING_ENTRY"
+                    signal.desk_id = desk_id
+                    db.commit()
+                    results[desk_id] = {
+                        "decision": "PARKED",
+                        "approved": False,
+                        "rejection_reason": f"Parked for pullback entry (pending #{pending_id})",
+                    }
+                    continue
+
                 # ── 9. CTO APPROVED → Log signal + Telegram alert ──
                 signal.status = "APPROVED"
                 signal.position_size_pct = trade_params.get("risk_pct")
