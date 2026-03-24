@@ -654,16 +654,25 @@ async def trigger_ohlcv_ingest(
     days_back = body.get("days_back", 30)
 
     async def _ingest():
+        import asyncio
         from app.services.ohlcv_ingester import OHLCVIngester
         ingester = OHLCVIngester()
         _db = SessionLocal()
+        total_bars = 0
         try:
             if symbols:
-                for sym in symbols:
-                    await ingester.ingest_symbol(_db, sym, days_back)
+                for i, sym in enumerate(symbols):
+                    count = await ingester.ingest_symbol(_db, sym, days_back)
                     _db.commit()
+                    total_bars += count
+                    logger.info(f"OHLCV ingest | {sym}: {count} bars ({i+1}/{len(symbols)})")
+                    if i < len(symbols) - 1:
+                        await asyncio.sleep(1.0)  # Rate limit: stay under 55/min
             else:
                 await ingester.ingest_all_symbols(_db, days_back)
+            logger.info(f"OHLCV ingest complete | {len(symbols)} symbols | {total_bars} total bars")
+        except Exception as e:
+            logger.error(f"OHLCV ingest failed: {e}", exc_info=True)
         finally:
             _db.close()
             await ingester.close()
