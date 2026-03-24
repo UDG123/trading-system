@@ -32,7 +32,7 @@ CRYPTO = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "LINKUSD"}
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 TD_MAP = {
-    "US30": "DJI", "US500": "SPX", "US100": "NDX", "NAS100": "NDX",
+    "US30": "DIA", "US500": "SPY", "US100": "QQQ", "NAS100": "QQQ",
     "GER40": "DAX", "UK100": "UKX", "JPN225": "NI225",
     "XAUUSD": "XAU/USD", "XAGUSD": "XAG/USD",
     "WTIUSD": "WTI/USD", "XCUUSD": "COPPER",
