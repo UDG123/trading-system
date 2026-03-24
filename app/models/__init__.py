@@ -7,6 +7,13 @@ __all__ = [
     "Signal", "Trade", "DeskState", "MLTradeLog",
 ]
 
+# Pending entry engine
+try:
+    from app.models.pending_signal import PendingSignal
+    __all__ += ["PendingSignal"]
+except Exception:
+    pass
+
 # Shadow sim engine models — loaded separately to isolate failures
 try:
     from app.models.shadow_signal import ShadowSignal

@@ -160,6 +160,60 @@ VIX_REGIMES = {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# HURST EXPONENT THRESHOLDS — PER ASSET CLASS
+# Gold/crypto have inherently higher volatility producing lower
+# short-term Hurst readings even during legitimate trends.
+# ═══════════════════════════════════════════════════════════════
+HURST_THRESHOLDS = {
+    "GOLD": 0.45,
+    "SILVER": 0.45,
+    "WTI": 0.48,
+    "CRYPTO": 0.45,
+    "INDEX": 0.48,
+    "EQUITY": 0.48,
+    "FOREX": 0.50,
+    "FOREX_JPY": 0.50,
+    "DEFAULT": 0.50,
+}
+HURST_TREND_THRESHOLDS = {
+    "GOLD": 0.52,
+    "SILVER": 0.52,
+    "WTI": 0.55,
+    "CRYPTO": 0.52,
+    "INDEX": 0.55,
+    "EQUITY": 0.55,
+    "FOREX": 0.55,
+    "FOREX_JPY": 0.55,
+    "DEFAULT": 0.55,
+}
+
+
+def get_hurst_thresholds(symbol: str):
+    """Return (chop_threshold, trend_threshold) for a symbol."""
+    sym = symbol.upper()
+    if "XAU" in sym:
+        ac = "GOLD"
+    elif "XAG" in sym:
+        ac = "SILVER"
+    elif "WTI" in sym:
+        ac = "WTI"
+    elif any(c in sym for c in ["BTC", "ETH", "SOL", "XRP", "LINK"]):
+        ac = "CRYPTO"
+    elif any(x in sym for x in ["US30", "US100", "NAS", "US500"]):
+        ac = "INDEX"
+    elif any(x in sym for x in ["TSLA", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "NFLX", "AMD"]):
+        ac = "EQUITY"
+    elif "JPY" in sym:
+        ac = "FOREX_JPY"
+    else:
+        ac = "FOREX"
+    return (
+        HURST_THRESHOLDS.get(ac, HURST_THRESHOLDS["DEFAULT"]),
+        HURST_TREND_THRESHOLDS.get(ac, HURST_TREND_THRESHOLDS["DEFAULT"]),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # PROFILES
 # ═══════════════════════════════════════════════════════════════
 SRV_100 = {
@@ -220,6 +274,13 @@ def calculate_lot_size(desk_id: str, symbol: str, risk_pct: float, sl_pips: floa
 
 CONSECUTIVE_LOSS_RULES = {2: 0.75, 3: 0.50, 4: "PAUSE_1H", 5: "CLOSE_DESK"}
 
+# ═══════════════════════════════════════════════════════════════
+# SIGNAL DEDUPLICATION
+# ═══════════════════════════════════════════════════════════════
+# TradingView fires alerts on every bar while condition is true.
+# Pipeline-level dedup catches semantically identical signals within this window.
+DEDUP_WINDOW_MINUTES = int(os.getenv("DEDUP_WINDOW_MINUTES", "15"))
+
 
 # ═══════════════════════════════════════════════════════════════
 # CONSENSUS SCORING v5.9
@@ -266,20 +327,20 @@ DESKS: Dict[str, dict] = {
     "DESK1_SCALPER": {
         "name": "FX Scalper",
         "style": "Scalper",
-        "symbols": ["EURUSD", "USDJPY", "GBPUSD", "USDCHF", "AUDUSD", "NZDUSD", "EURCHF"],
-        "timeframes": {"bias": "15M", "confirmation": "5M", "entry": "1M"},
+        "symbols": ["EURUSD", "USDJPY", "GBPUSD", "USDCHF", "AUDUSD"],
+        "timeframes": {"bias": "1H", "confirmation": "5M", "entry": "1M"},
         "luxalgo_preset": "Scalper",
         "luxalgo_filter": "Smart Trail",
         "ml_classifier": 34,
-        "sensitivity": 7,
+        "sensitivity": 14,
+        "spread_filter_pips": 2.0,
         "trailing_stop_pips": 10,
-        "max_trades_day": 20,
-        "max_simultaneous": 5,
-        "max_hold_hours": 1.5,
+        "max_trades_day": 12,
+        "max_simultaneous": 3,
+        "max_hold_hours": 0.5,
         "risk_pct": 0.5,
         "sessions": ["LONDON_OPEN", "NY_OPEN"],
         "alerts": [
-            "bullish_confirmation", "bearish_confirmation",
             "bullish_confirmation_plus", "bearish_confirmation_plus",
             "bullish_exit", "bearish_exit", "take_profit", "stop_loss",
         ],
@@ -289,13 +350,13 @@ DESKS: Dict[str, dict] = {
         "style": "Intraday",
         "symbols": [
             "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
-            "NZDUSD", "EURGBP", "GBPCAD", "AUDCAD", "CHFJPY", "EURNZD",
+            "NZDUSD", "EURGBP", "GBPCAD",
         ],
         "timeframes": {"bias": "4H", "confirmation": "1H", "entry": "15M"},
         "luxalgo_preset": "Trend Trader",
         "luxalgo_filter": "Trend Catcher",
         "ml_classifier": 34,
-        "sensitivity": 14,
+        "sensitivity": 12,
         "trailing_stop_pips": 30,
         "max_trades_day": 10,
         "max_simultaneous": 5,
@@ -322,14 +383,14 @@ DESKS: Dict[str, dict] = {
         "luxalgo_preset": "Swing Trader",
         "luxalgo_filter": "Trend Catcher",
         "ml_classifier": 34,
-        "sensitivity": 14,
+        "sensitivity": 18,
         "trailing_stop_pips": 80,
         "max_simultaneous": 5,
         "max_trades_day": 6,
         "max_hold_hours": 120,
         "risk_pct": 1.0,
         "sessions": ["ALL"],
-        "close_friday_utc": 20,
+        "close_friday_utc": 14,
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
@@ -394,8 +455,8 @@ DESKS: Dict[str, dict] = {
         "luxalgo_preset": "Trend Trader + Trend Strength",
         "luxalgo_filter": "Smart Trail",
         "ml_classifier": 34,
-        "sensitivity": 14,
-        "sensitivity_crypto": 16,
+        "sensitivity": 13,
+        "sensitivity_crypto": 13,
         "trailing_stop_pips": {"indices": 15, "crypto": 50, "commodity": 30},
         "max_trades_day": 10,
         "max_simultaneous": 5,
@@ -405,7 +466,7 @@ DESKS: Dict[str, dict] = {
         "risk_pct_crypto": 0.50,
         "sessions": ["US_MARKET", "WEEKDAY_CRYPTO"],
         "no_weekend_crypto": True,
-        "vix_halt_above": 30,
+        "vix_halt_above": 35,
         "alerts": [
             "bullish_confirmation", "bearish_confirmation",
             "bullish_plus", "bearish_plus",
@@ -421,14 +482,15 @@ DESKS: Dict[str, dict] = {
         "luxalgo_preset": "Trend Trader",
         "luxalgo_filter": "Smart Trail",
         "ml_classifier": 34,
-        "sensitivity": 12,
+        "sensitivity": 10,
         "trailing_stop_pips": 25,
         "max_trades_day": 6,
         "max_simultaneous": 4,
         "max_hold_hours": 7,
         "risk_pct": 0.75,
         "sessions": ["US_MARKET"],
-        "active_window": "13:30-20:00 UTC",
+        "active_window": "14:00-16:00,19:00-20:00 UTC",
+        "earnings_blackout_days": 3,
         "vix_halt_above": 30,
         "require_vwap_alignment": True,
         "alerts": [
@@ -488,7 +550,10 @@ CORRELATION_GROUPS = {
     "ENERGY":          {"symbols": ["WTIUSD"], "long_correlated": True},
 }
 
-MAX_CORRELATED_POSITIONS = 2
+MAX_CORRELATED_POSITIONS = 2   # per correlation group
+MAX_TOTAL_OPEN_POSITIONS = 12  # firm-wide cap
+MAX_GROUP_RISK_PCT = 3.0       # max risk % per correlation group
+MAX_PORTFOLIO_RISK_PCT = 10.0  # max total risk % across all positions
 
 SYMBOL_ALIASES = {
     "FX:EURUSD": "EURUSD", "FX:USDJPY": "USDJPY", "FX:GBPUSD": "GBPUSD",

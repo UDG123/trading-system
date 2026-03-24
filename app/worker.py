@@ -38,8 +38,9 @@ CONSUMER_NAME = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
 BLOCK_MS = 5000           # Block 5s waiting for new messages
 BATCH_SIZE = 10            # Read up to 10 messages per batch
 
-# ─── Hurst Chop Zone — unified threshold for 69.5% win rate target ───
-HURST_CHOP_THRESHOLD = 0.52   # H < 0.52 = Chop Zone → veto ALL desks
+# ─── Hurst Chop Zone — per-asset-class thresholds (0.45-0.50) ───
+# Gold/crypto use lower thresholds (0.45) due to inherent volatility.
+# See config.get_hurst_thresholds() for per-symbol lookups.
 
 # ─── Graceful shutdown ───
 _shutdown = asyncio.Event()
@@ -148,7 +149,7 @@ async def generate_daily_digest(db_session_factory) -> str:
         msg += (
             f"└─────────────────────\n"
             f"\n"
-            f"  ⚙️ Hurst Chop Zone: H < {HURST_CHOP_THRESHOLD}\n"
+            f"  ⚙️ Per-instrument Hurst thresholds (0.45-0.50)\n"
             f"  🤖 Zero-Key Oracle v6.1.0\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
@@ -210,7 +211,7 @@ class VerificationWorker:
             f"Worker '{CONSUMER_NAME}' started | "
             f"Stream: {STREAM_KEY} | Group: {CONSUMER_GROUP} | "
             f"Batch: {BATCH_SIZE} | Block: {BLOCK_MS}ms | "
-            f"Hurst Chop Zone: H < {HURST_CHOP_THRESHOLD}"
+            f"Per-instrument Hurst thresholds (0.45-0.50)"
         )
 
         await self._consume_loop()
@@ -440,7 +441,7 @@ async def main():
     logger.info("OniQuant v6.1.0 — Signal Generator Worker")
     logger.info(f"Stream: {STREAM_KEY} | Group: {CONSUMER_GROUP}")
     logger.info(f"Consumer: {CONSUMER_NAME}")
-    logger.info(f"Hurst Chop Zone: H < {HURST_CHOP_THRESHOLD}")
+    logger.info("Per-instrument Hurst thresholds (0.45-0.50)")
     logger.info(f"Broker: VirtualBroker (Shadow Sim)")
     logger.info("=" * 60)
 

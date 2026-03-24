@@ -255,6 +255,86 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.debug(f"Sim exit checker error: {e}")
 
+        # ── Pending Entry Engine: re-evaluate parked signals every 30s ──
+        async def _run_pending_check():
+            try:
+                from app.services.pending_engine import PendingEngine
+                from app.services.price_service import PriceService
+                from app.services.telegram_bot import TelegramBot
+                from app.models.trade import Trade as TradeModel
+                from app.config import (
+                    DESKS, PORTFOLIO_CAPITAL_PER_DESK, CAPITAL_PER_ACCOUNT,
+                    get_pip_info, calculate_lot_size,
+                )
+                engine = PendingEngine()
+                ps = PriceService()
+                db = SessionLocal()
+                try:
+                    triggered = await engine.check_pending(db, ps)
+                    for p in triggered:
+                        # Create SIM_OPEN trade for triggered pending signal
+                        desk = DESKS.get(p.desk_id, {})
+                        risk_pct = desk.get("risk_pct", 1.0)
+                        desk_capital = PORTFOLIO_CAPITAL_PER_DESK.get(p.desk_id, CAPITAL_PER_ACCOUNT)
+                        risk_dollars = desk_capital * (risk_pct / 100)
+                        pip_size, pip_value = get_pip_info(p.symbol)
+                        sl_pips = abs(float(p.trigger_price or p.entry_target) - float(p.stop_loss or 0)) / pip_size if p.stop_loss and pip_size else 0
+                        lot_size = calculate_lot_size(
+                            desk_id=p.desk_id, symbol=p.symbol,
+                            risk_pct=risk_pct, sl_pips=sl_pips,
+                            account_capital=desk_capital,
+                        )
+                        trade = TradeModel(
+                            signal_id=p.signal_id,
+                            desk_id=p.desk_id,
+                            symbol=p.symbol,
+                            direction=p.direction,
+                            entry_price=p.trigger_price or p.entry_target,
+                            lot_size=lot_size,
+                            risk_pct=risk_pct,
+                            risk_dollars=risk_dollars,
+                            stop_loss=p.stop_loss,
+                            take_profit_1=p.take_profit_1,
+                            take_profit_2=p.take_profit_2,
+                            status="SIM_OPEN",
+                            opened_at=p.triggered_at,
+                        )
+                        db.add(trade)
+                        db.flush()
+                        # Send Telegram alert
+                        tg = TelegramBot()
+                        trade_params = {
+                            "desk_id": p.desk_id, "symbol": p.symbol,
+                            "direction": p.direction, "price": p.trigger_price,
+                            "alert_type": p.alert_type, "risk_pct": risk_pct,
+                            "risk_dollars": round(risk_dollars, 2),
+                            "stop_loss": p.stop_loss,
+                            "take_profit_1": p.take_profit_1,
+                            "take_profit_2": p.take_profit_2,
+                        }
+                        await tg.notify_trade_entry(
+                            trade_params,
+                            {"decision": "EXECUTE", "reasoning": f"Pending #{p.id} triggered at pullback"},
+                        )
+                        logger.info(
+                            f"PENDING→TRADE | #{p.id} → Trade #{trade.id} | "
+                            f"{p.symbol} {p.direction} @ {p.trigger_price}"
+                        )
+                    db.commit()
+                finally:
+                    db.close()
+                    await ps.close()
+            except Exception as e:
+                logger.debug(f"Pending engine check error: {e}")
+
+        _scheduler.add_job(
+            _run_pending_check,
+            trigger=IntervalTrigger(seconds=30),
+            id="pending_entry_check",
+            name="Pending Entry Checker (every 30s)",
+            replace_existing=True,
+        )
+
         _scheduler.add_job(
             _run_triple_barrier_labeler,
             trigger=IntervalTrigger(minutes=30),
@@ -276,7 +356,7 @@ async def lifespan(app: FastAPI):
             name="Sim Exit Checker (every 60s)",
             replace_existing=True,
         )
-        logger.info("Shadow sim jobs registered: labeler 30min | equity 15min | exit-check 60s")
+        logger.info("Shadow sim jobs registered: pending-entry 30s | labeler 30min | equity 15min | exit-check 60s")
     except Exception as e:
         logger.error(f"Shadow sim scheduler jobs failed to register: {e}")
 

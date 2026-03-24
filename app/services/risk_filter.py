@@ -15,7 +15,7 @@ from app.config import (
     DESKS, CAPITAL_PER_ACCOUNT, MAX_DAILY_LOSS_PER_ACCOUNT,
     MAX_TOTAL_LOSS_PER_ACCOUNT, FIRM_WIDE_DAILY_DRAWDOWN_HALT,
     CONSECUTIVE_LOSS_RULES, SESSION_WINDOWS, CORRELATION_GROUPS,
-    MAX_CORRELATED_POSITIONS,
+    MAX_CORRELATED_POSITIONS, MAX_TOTAL_OPEN_POSITIONS, MAX_PORTFOLIO_RISK_PCT,
 )
 from app.models.trade import Trade
 from app.models.desk_state import DeskState
@@ -303,6 +303,26 @@ class HardRiskFilter:
                 )
                 logger.info(f"CORRELATION BLOCK | {msg}")
                 return False, msg
+
+        return True, ""
+
+    def check_portfolio_limits(self, db: Session, symbol: str, direction: str, risk_pct: float) -> Tuple[bool, str]:
+        """Check firm-wide portfolio limits. Returns (ok, reason)."""
+        # Total open positions check
+        total_open = db.query(func.count(Trade.id)).filter(
+            Trade.status.in_(["OPEN", "EXECUTED", "SIM_OPEN"])
+        ).scalar() or 0
+
+        if total_open >= MAX_TOTAL_OPEN_POSITIONS:
+            return False, f"Portfolio full: {total_open}/{MAX_TOTAL_OPEN_POSITIONS} positions open"
+
+        # Total portfolio risk check
+        total_risk = db.query(func.coalesce(func.sum(Trade.risk_pct), 0)).filter(
+            Trade.status.in_(["OPEN", "EXECUTED", "SIM_OPEN"])
+        ).scalar() or 0
+
+        if float(total_risk) + risk_pct > MAX_PORTFOLIO_RISK_PCT:
+            return False, f"Portfolio risk {float(total_risk) + risk_pct:.1f}% exceeds {MAX_PORTFOLIO_RISK_PCT}% cap"
 
         return True, ""
 
