@@ -29,6 +29,17 @@ logger = logging.getLogger("TradingSystem.Telegram")
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
+
+def _sanitize_text(text: str) -> str:
+    """Strip angle brackets that Telegram may interpret as HTML tags.
+    Replaces < and > with Unicode look-alikes so messages always render
+    as plain text, even if the bot has a default parse_mode set via BotFather.
+    """
+    import re
+    # Replace HTML-like tags (e.g. <class 'Foo'>, <Response [400]>) with cleaned text
+    text = re.sub(r'<([^>]*)>', r'[\1]', text)
+    return text
+
 BAR = "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
 SCORE_FILLED = "\U0001f7ea"
 SCORE_EMPTY = "\u2b1c"
@@ -131,6 +142,7 @@ class TelegramBot:
         target = chat_id or self.portfolio_chat or self.fallback_chat
         if not target:
             return False
+        text = _sanitize_text(text)
         try:
             resp = await self.client.post(
                 f"{TELEGRAM_API.format(token=self.token)}/sendMessage",

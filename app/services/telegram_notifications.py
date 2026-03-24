@@ -1,8 +1,14 @@
 import os
+import re
 import httpx
 import logging
 
 logger = logging.getLogger("OniQuant.Telegram")
+
+
+def _sanitize_text(text: str) -> str:
+    """Strip angle brackets that Telegram may interpret as HTML tags."""
+    return re.sub(r'<([^>]*)>', r'[\1]', text)
 
 
 class TelegramService:
@@ -22,6 +28,7 @@ class TelegramService:
         if desk_tg_id:
             targets.append(desk_tg_id)
 
+        message = _sanitize_text(message)
         async with httpx.AsyncClient() as client:
             for chat_id in targets:
                 try:
