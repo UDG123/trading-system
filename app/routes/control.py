@@ -170,36 +170,3 @@ async def trigger_monthly_report(db: Session = Depends(get_db)):
     reporter = _get_reporter()
     await reporter.send_monthly_report(db)
     return {"status": "sent", "report": "monthly"}
-
-
-# ─────────────────────────────────────────
-# ML TRAINING DATA EXPORT
-# ─────────────────────────────────────────
-
-@router.get("/ml/export")
-async def export_ml_data(
-    db: Session = Depends(get_db),
-    desk_id: str = None,
-    symbol: str = None,
-    labeled_only: bool = True,
-    limit: int = None,
-):
-    """
-    Export ML training data as JSON.
-    Ready to load into pandas: pd.DataFrame(response["data"])
-
-    Query params:
-      ?desk_id=DESK1_SCALPER&symbol=EURUSD&labeled_only=true&limit=1000
-    """
-    from app.services.ml_data_logger import MLDataLogger
-    data = MLDataLogger.get_training_data(
-        db, labeled_only=labeled_only, desk_id=desk_id, symbol=symbol, limit=limit,
-    )
-    return {"count": len(data), "data": data}
-
-
-@router.get("/ml/stats")
-async def ml_data_stats(db: Session = Depends(get_db)):
-    """Quick stats on collected ML training data."""
-    from app.services.ml_data_logger import MLDataLogger
-    return MLDataLogger.get_stats(db)

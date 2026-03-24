@@ -121,6 +121,62 @@ class OHLCVIngester:
 
         return total
 
+    async def ingest_symbol_recent(
+        self, db: Session, symbol: str, interval: str = "1min", outputsize: int = 500
+    ) -> int:
+        """Fetch the N most recent bars for a symbol using outputsize. Returns bars inserted."""
+        if symbol in CRYPTO_SYMBOLS:
+            # Binance: fetch last N minutes
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(minutes=outputsize + 1)
+            bars = await self._fetch_binance_klines(symbol, "1m", start, end)
+        else:
+            bars = await self._fetch_twelvedata_recent(symbol, interval, outputsize)
+
+        if not bars:
+            return 0
+
+        return self._upsert_bars(db, symbol, bars)
+
+    async def _fetch_twelvedata_recent(
+        self, symbol: str, interval: str = "1min", outputsize: int = 500
+    ) -> List[Dict]:
+        """Fetch N most recent bars from TwelveData (no date range needed)."""
+        if not TWELVEDATA_API_KEY:
+            return []
+
+        td_sym = TD_MAP.get(symbol, symbol)
+        bars = []
+
+        try:
+            resp = await self.client.get(
+                "https://api.twelvedata.com/time_series",
+                params={
+                    "symbol": td_sym,
+                    "interval": interval,
+                    "outputsize": outputsize,
+                    "apikey": TWELVEDATA_API_KEY,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "error":
+                    logger.warning(f"TwelveData error for {symbol}: {data.get('message')}")
+                    return []
+                for v in reversed(data.get("values", [])):
+                    bars.append({
+                        "time": v.get("datetime"),
+                        "open": float(v.get("open", 0)),
+                        "high": float(v.get("high", 0)),
+                        "low": float(v.get("low", 0)),
+                        "close": float(v.get("close", 0)),
+                        "volume": float(v.get("volume", 0)),
+                    })
+        except Exception as e:
+            logger.debug(f"TwelveData recent fetch failed for {symbol}: {e}")
+
+        return bars
+
     async def _fetch_twelvedata(
         self, symbol: str, interval: str, start: datetime, end: datetime
     ) -> List[Dict]:

@@ -647,23 +647,54 @@ async def trigger_ohlcv_ingest(
     db: Session = Depends(get_db),
     x_api_key: str = Header(None),
 ):
-    """Trigger OHLCV data ingestion for specified symbols."""
+    """
+    Trigger OHLCV data ingestion for specified symbols.
+
+    Body:
+      {"symbols": ["EURUSD", ...], "interval": "1min", "outputsize": 500}
+      OR legacy: {"symbols": [...], "days_back": 30}
+
+    When outputsize is provided, fetches N most recent bars per symbol (no date range).
+    When days_back is provided, fetches full date range (start/end).
+    """
     _verify(x_api_key)
 
     symbols = body.get("symbols", [])
+    interval = body.get("interval", "1min")
+    outputsize = body.get("outputsize")
     days_back = body.get("days_back", 30)
 
     async def _ingest():
+        import asyncio
         from app.services.ohlcv_ingester import OHLCVIngester
         ingester = OHLCVIngester()
         _db = SessionLocal()
+        total_bars = 0
+        ingested_count = 0
         try:
             if symbols:
-                for sym in symbols:
-                    await ingester.ingest_symbol(_db, sym, days_back)
+                for i, sym in enumerate(symbols):
+                    if outputsize:
+                        count = await ingester.ingest_symbol_recent(
+                            _db, sym, interval=interval, outputsize=outputsize
+                        )
+                    else:
+                        count = await ingester.ingest_symbol(_db, sym, days_back)
                     _db.commit()
+                    total_bars += count
+                    if count > 0:
+                        ingested_count += 1
+                    logger.info(f"OHLCV ingest | {sym}: {count} bars ({i+1}/{len(symbols)})")
+                    if i < len(symbols) - 1:
+                        await asyncio.sleep(1.0)  # Rate limit: stay under 55/min
             else:
                 await ingester.ingest_all_symbols(_db, days_back)
+            logger.info(
+                f"OHLCV ingest complete | {ingested_count}/{len(symbols)} symbols | "
+                f"{total_bars} total bars"
+            )
+        except Exception as e:
+            logger.error(f"OHLCV ingest failed: {e}", exc_info=True)
         finally:
             _db.close()
             await ingester.close()
@@ -673,7 +704,8 @@ async def trigger_ohlcv_ingest(
     return {
         "status": "ingesting",
         "symbols": symbols if symbols else "all",
-        "days_back": days_back,
+        "interval": interval,
+        "outputsize": outputsize or f"{days_back}d range",
     }
 
 

@@ -11,9 +11,10 @@ No execution layer — output is Telegram alerts ONLY.
 Runs asynchronously after webhook logs the validated signal.
 """
 import json
+import os
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict
 
 from sqlalchemy.orm import Session
@@ -34,6 +35,10 @@ from app.config import (
 from app.services.ml_data_logger import MLDataLogger
 
 logger = logging.getLogger("TradingSystem.Pipeline")
+
+# Deduplication window — skip signals that match (symbol, alert_type, desk_id, direction)
+# within this many minutes. TradingView fires alerts on every bar while condition is true.
+DEDUP_WINDOW_MINUTES = int(os.getenv("DEDUP_WINDOW_MINUTES", "15"))
 
 # Shared service instances (initialized once)
 _enricher: TwelveDataEnricher = None
@@ -141,6 +146,63 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
         signal._ml_trade_id = None
 
         logger.info(f"── Processing for {desk_id} ──")
+
+        # ── 1b. Dedup check — skip if identical signal was processed recently ──
+        # TradingView fires alerts on every bar while condition is true,
+        # causing duplicates like AUDUSD take_profit EXIT hitting 4x in 30min.
+        try:
+            from sqlalchemy import text as sa_text
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=DEDUP_WINDOW_MINUTES)
+            dup_row = db.execute(
+                sa_text("""
+                    SELECT id, received_at
+                    FROM signals
+                    WHERE symbol_normalized = :sym
+                      AND alert_type = :atype
+                      AND desk_id = :desk
+                      AND direction = :dir
+                      AND received_at > :cutoff
+                      AND status NOT IN ('DUPLICATE', 'RECEIVED', 'VALIDATED')
+                      AND id != :self_id
+                    ORDER BY received_at DESC
+                    LIMIT 1
+                """),
+                {
+                    "sym": signal.symbol_normalized,
+                    "atype": signal.alert_type,
+                    "desk": desk_id,
+                    "dir": signal.direction or "",
+                    "cutoff": cutoff,
+                    "self_id": signal.id,
+                },
+            ).fetchone()
+
+            if dup_row:
+                existing_id = dup_row[0]
+                existing_time = dup_row[1]
+                if existing_time.tzinfo is None:
+                    existing_time = existing_time.replace(tzinfo=timezone.utc)
+                age_minutes = (
+                    datetime.now(timezone.utc) - existing_time
+                ).total_seconds() / 60.0
+                signal.status = "DUPLICATE"
+                signal.desk_id = desk_id
+                db.commit()
+                logger.info(
+                    f"DEDUP | {signal.symbol_normalized} {signal.alert_type} on {desk_id} "
+                    f"— duplicate of signal #{existing_id} from {age_minutes:.1f}m ago"
+                )
+                results[desk_id] = {
+                    "decision": "SKIP",
+                    "approved": False,
+                    "rejection_reason": (
+                        f"Duplicate of #{existing_id} ({age_minutes:.1f}m ago, "
+                        f"window={DEDUP_WINDOW_MINUTES}m)"
+                    ),
+                }
+                continue
+        except Exception as e:
+            logger.debug(f"Dedup check failed for {desk_id}, proceeding: {e}")
 
         try:
             # ── 2. Enrich with market data ──
