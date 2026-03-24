@@ -181,6 +181,12 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             try:
                 live_price = await price_service.get_price(signal.symbol_normalized)
                 if live_price and live_price > 0:
+                    tv_close = float(signal_data.get("price") or 0)
+                    if tv_close > 0 and abs(live_price - tv_close) / tv_close > 0.9:
+                        logger.warning(
+                            f"PRICE MISMATCH | {signal.symbol_normalized} | "
+                            f"Live: {live_price} vs TV: {tv_close} — possible wrong TwelveData symbol"
+                        )
                     logger.info(
                         f"Live price for {signal.symbol_normalized}: {live_price} "
                         f"(TV close was {signal_data.get('price')})"
@@ -336,7 +342,8 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             )
 
             signal.claude_decision = decision["decision"]
-            signal.claude_reasoning = decision.get("reasoning", "")
+            _reasoning = decision.get("reasoning", "")
+            signal.claude_reasoning = _reasoning[:997] + "..." if len(_reasoning) > 1000 else _reasoning
 
             # ── 8. Risk flags (advisory only — does NOT block trades) ──
             risk_flags = []
@@ -428,6 +435,9 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     opened_at=datetime.now(timezone.utc),
                     close_reason="|".join(risk_flags) if risk_flags else None,
                 )
+                # Defensive truncation — safety net for long string fields
+                if trade_record.close_reason and len(trade_record.close_reason) > 500:
+                    trade_record.close_reason = trade_record.close_reason[:497] + "..."
                 db.add(trade_record)
                 db.flush()
                 signal._ml_trade_id = trade_record.id
@@ -450,7 +460,8 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                 # ── CTO said HOLD or SKIP → log as SKIP ──
                 signal.status = "REJECTED"
                 signal.claude_decision = decision.get("decision", "SKIP")
-                signal.claude_reasoning = decision.get("reasoning", "")
+                _skip_reasoning = decision.get("reasoning", "")
+                signal.claude_reasoning = _skip_reasoning[:997] + "..." if len(_skip_reasoning) > 1000 else _skip_reasoning
                 approved = False
                 rejection_reason = decision.get("reasoning", "CTO SKIP")
 
@@ -518,8 +529,12 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
 
         except Exception as e:
             logger.error(f"Pipeline error for {desk_id}: {e}", exc_info=True)
-            signal.status = "ERROR"
-            db.commit()
+            try:
+                db.rollback()
+                signal.status = "ERROR"
+                db.commit()
+            except Exception as rb_err:
+                logger.error(f"Session rollback/recovery failed for {desk_id}: {rb_err}")
             results[desk_id] = {
                 "decision": "SKIP",
                 "approved": False,
