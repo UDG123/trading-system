@@ -11,6 +11,7 @@ No execution layer — output is Telegram alerts ONLY.
 Runs asynchronously after webhook logs the validated signal.
 """
 import json
+import os
 import time
 import logging
 from datetime import datetime, timezone, timedelta
@@ -35,6 +36,10 @@ from app.config import (
 from app.services.ml_data_logger import MLDataLogger
 
 logger = logging.getLogger("TradingSystem.Pipeline")
+
+# Deduplication window — skip signals that match (symbol, alert_type, desk_id, direction)
+# within this many minutes. TradingView fires alerts on every bar while condition is true.
+DEDUP_WINDOW_MINUTES = int(os.getenv("DEDUP_WINDOW_MINUTES", "15"))
 
 # Shared service instances (initialized once)
 _enricher: TwelveDataEnricher = None
