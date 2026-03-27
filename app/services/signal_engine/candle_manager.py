@@ -203,9 +203,9 @@ class CandleManager:
         if not table or not bars:
             return 0
 
-        # Upsert into DB
-        for bar in bars:
-            try:
+        # Upsert into DB — batch insert with rollback on failure
+        try:
+            for bar in bars:
                 db.execute(
                     text(f"""
                         INSERT INTO {table} (time, symbol, open, high, low, close, volume)
@@ -222,9 +222,10 @@ class CandleManager:
                         "volume": bar["volume"],
                     },
                 )
-            except Exception:
-                continue
-        db.commit()
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"DB insert failed for {symbol} {timeframe} ({table}): {e}")
 
         # Update in-memory DataFrame
         new_df = pd.DataFrame(bars)

@@ -134,6 +134,28 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables verified")
 
+    # Create OHLCV tables for signal engine (not managed by SQLAlchemy ORM)
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        for tf_table in ["ohlcv_5m", "ohlcv_15m", "ohlcv_1h", "ohlcv_4h", "ohlcv_1d", "ohlcv_1w"]:
+            conn.execute(sa_text(f"""
+                CREATE TABLE IF NOT EXISTS {tf_table} (
+                    time TIMESTAMPTZ NOT NULL,
+                    symbol VARCHAR(20) NOT NULL,
+                    open DOUBLE PRECISION,
+                    high DOUBLE PRECISION,
+                    low DOUBLE PRECISION,
+                    close DOUBLE PRECISION,
+                    volume DOUBLE PRECISION,
+                    PRIMARY KEY (time, symbol)
+                )
+            """))
+            conn.execute(sa_text(f"""
+                CREATE INDEX IF NOT EXISTS ix_{tf_table}_symbol_time ON {tf_table} (symbol, time)
+            """))
+        conn.commit()
+        logger.info("Signal engine OHLCV tables verified (5m, 15m, 1h, 4h, 1d, 1w)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
