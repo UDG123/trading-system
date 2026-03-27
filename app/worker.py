@@ -260,9 +260,10 @@ class VerificationWorker:
         alert_type = payload.get("alert_type", "?")
         desks = payload.get("desks_matched", [])
 
+        source = payload.get("source", "tradingview")
         logger.info(
             f"PROCESSING | {msg_id.decode()} | {symbol} {alert_type} | "
-            f"Desks: {desks}"
+            f"Desks: {desks} | Source: {source}"
         )
 
         # ── Shadow Log — captures EVERYTHING before pipeline ──
