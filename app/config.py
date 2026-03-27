@@ -34,6 +34,9 @@ BINANCE_REST_URL = "https://api.binance.com"
 BINANCE_WS_ENABLED = os.getenv("BINANCE_WS_ENABLED", "true").lower() in ("true", "1", "yes")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
+# Signal source: TV_ONLY | PYTHON_ONLY | BOTH (shadow/validation mode)
+SIGNAL_SOURCE = os.getenv("SIGNAL_SOURCE", "BOTH")
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM
 # ─────────────────────────────────────────────────────────────

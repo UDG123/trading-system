@@ -43,6 +43,7 @@ _diag_service = None
 _price_service = None
 _redis_pool = None
 _scheduler = None
+_signal_engine_task = None
 
 
 async def _auto_report_scheduler():
@@ -363,9 +364,32 @@ async def lifespan(app: FastAPI):
     _scheduler.start()
     logger.info("APScheduler started: Daily PnL Digest at 17:00 America/Toronto")
 
+    # ── Python Signal Engine (v7.0) ──
+    from app.config import SIGNAL_SOURCE
+    global _signal_engine_task
+    if SIGNAL_SOURCE in ("PYTHON_ONLY", "BOTH"):
+        try:
+            from app.services.signal_engine.engine import SignalEngine
+            _signal_engine = SignalEngine(
+                redis_pool=_redis_pool,
+                db_session_factory=SessionLocal,
+            )
+            _signal_engine_task = asyncio.create_task(_signal_engine.run())
+            logger.info(
+                f"Python Signal Engine started (mode: {SIGNAL_SOURCE}) — "
+                f"replacing TradingView alerts"
+            )
+        except Exception as e:
+            logger.error(f"Signal Engine failed to start: {e}", exc_info=True)
+    else:
+        logger.info(f"Signal Engine disabled (SIGNAL_SOURCE={SIGNAL_SOURCE})")
+
     yield
 
     # Cancel background tasks
+    if _signal_engine_task and not _signal_engine_task.done():
+        _signal_engine_task.cancel()
+        logger.info("Signal Engine stopped")
     if _report_task:
         _report_task.cancel()
     if _price_service:
