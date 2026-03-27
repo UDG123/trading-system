@@ -1,6 +1,6 @@
 """
 Technical Indicator Calculator
-Computes all indicators using pandas-ta + custom implementations.
+Computes all indicators using the `ta` library + custom implementations.
 Returns a flat dict of indicator values for a given symbol-timeframe DataFrame.
 """
 import logging
@@ -28,6 +28,67 @@ def wavetrend(high: pd.Series, low: pd.Series, close: pd.Series,
     return wt1, wt2
 
 
+def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
+               atr_period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """
+    SuperTrend indicator computed manually from ATR.
+    Returns DataFrame with columns 'supertrend' (value) and 'direction' (1=up, -1=down).
+    """
+    from ta.volatility import AverageTrueRange
+    atr = AverageTrueRange(high=high, low=low, close=close, window=atr_period).average_true_range()
+
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+
+    st_direction = pd.Series(np.ones(len(close)), index=close.index)  # 1 = bullish
+    st_value = pd.Series(np.nan, index=close.index)
+
+    final_upper = upper_band.copy()
+    final_lower = lower_band.copy()
+
+    for i in range(1, len(close)):
+        # Lower band logic
+        if lower_band.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
+            final_lower.iloc[i] = lower_band.iloc[i]
+        else:
+            final_lower.iloc[i] = final_lower.iloc[i - 1]
+
+        # Upper band logic
+        if upper_band.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
+            final_upper.iloc[i] = upper_band.iloc[i]
+        else:
+            final_upper.iloc[i] = final_upper.iloc[i - 1]
+
+        # Direction
+        if st_direction.iloc[i - 1] == 1:
+            if close.iloc[i] < final_lower.iloc[i]:
+                st_direction.iloc[i] = -1
+            else:
+                st_direction.iloc[i] = 1
+        else:
+            if close.iloc[i] > final_upper.iloc[i]:
+                st_direction.iloc[i] = 1
+            else:
+                st_direction.iloc[i] = -1
+
+    # Value: lower band when bullish, upper band when bearish
+    for i in range(len(close)):
+        st_value.iloc[i] = final_lower.iloc[i] if st_direction.iloc[i] == 1 else final_upper.iloc[i]
+
+    return pd.DataFrame({"supertrend": st_value, "direction": st_direction}, index=close.index)
+
+
+def _safe_last(series: Optional[pd.Series]) -> Optional[float]:
+    """Extract the last non-NaN value from a Series, or None."""
+    if series is None or series.empty:
+        return None
+    val = series.iloc[-1]
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
 class IndicatorCalculator:
     """Computes technical indicators on OHLCV DataFrames."""
 
@@ -40,9 +101,11 @@ class IndicatorCalculator:
             return None
 
         try:
-            import pandas_ta as ta
+            from ta.trend import EMAIndicator, MACD, ADXIndicator
+            from ta.momentum import RSIIndicator, StochRSIIndicator
+            from ta.volatility import AverageTrueRange, BollingerBands, KeltnerChannel
         except ImportError:
-            logger.error("pandas-ta not installed")
+            logger.error("ta library not installed")
             return None
 
         try:
@@ -55,13 +118,13 @@ class IndicatorCalculator:
             result: Dict = {"price": latest}
 
             # ── EMAs ──
-            ema21 = ta.ema(close, length=21)
-            ema50 = ta.ema(close, length=50)
-            ema200 = ta.ema(close, length=200) if len(close) >= 200 else None
+            ema21_series = EMAIndicator(close=close, window=21).ema_indicator()
+            ema50_series = EMAIndicator(close=close, window=50).ema_indicator()
+            ema200_series = EMAIndicator(close=close, window=200).ema_indicator() if len(close) >= 200 else None
 
-            result["ema21"] = float(ema21.iloc[-1]) if ema21 is not None and not ema21.empty else None
-            result["ema50"] = float(ema50.iloc[-1]) if ema50 is not None and not ema50.empty else None
-            result["ema200"] = float(ema200.iloc[-1]) if ema200 is not None and not ema200.empty else None
+            result["ema21"] = _safe_last(ema21_series)
+            result["ema50"] = _safe_last(ema50_series)
+            result["ema200"] = _safe_last(ema200_series)
 
             # EMA alignment score
             result["ema_aligned_bull"] = (
@@ -85,82 +148,70 @@ class IndicatorCalculator:
             )
 
             # EMA slope (positive = rising)
-            if ema50 is not None and len(ema50) >= 5:
-                result["ema50_slope"] = float(ema50.iloc[-1] - ema50.iloc[-5])
+            if ema50_series is not None and len(ema50_series) >= 5:
+                v1 = ema50_series.iloc[-1]
+                v5 = ema50_series.iloc[-5]
+                result["ema50_slope"] = float(v1 - v5) if not (pd.isna(v1) or pd.isna(v5)) else 0.0
             else:
                 result["ema50_slope"] = 0.0
 
-            # ── SuperTrend ──
-            st = ta.supertrend(high, low, close, length=10, multiplier=3.0)
-            if st is not None and not st.empty:
-                st_dir_col = [c for c in st.columns if "SUPERTd" in c]
-                st_val_col = [c for c in st.columns if "SUPERT_" in c and "SUPERTd" not in c]
-                result["supertrend_direction"] = int(st[st_dir_col[0]].iloc[-1]) if st_dir_col else 0
-                result["supertrend_value"] = float(st[st_val_col[0]].iloc[-1]) if st_val_col else None
-                # Detect SuperTrend flip (direction change on last bar)
-                if st_dir_col and len(st) >= 2:
-                    prev_dir = st[st_dir_col[0]].iloc[-2]
-                    curr_dir = st[st_dir_col[0]].iloc[-1]
-                    result["supertrend_flip"] = bool(prev_dir != curr_dir)
-                else:
-                    result["supertrend_flip"] = False
+            # ── SuperTrend (manual from ATR) ──
+            st = supertrend(high, low, close, atr_period=10, multiplier=3.0)
+            result["supertrend_direction"] = int(st["direction"].iloc[-1])
+            result["supertrend_value"] = float(st["supertrend"].iloc[-1])
+            if len(st) >= 2:
+                result["supertrend_flip"] = bool(
+                    st["direction"].iloc[-2] != st["direction"].iloc[-1]
+                )
             else:
-                result["supertrend_direction"] = 0
-                result["supertrend_value"] = None
                 result["supertrend_flip"] = False
 
             # ── RSI ──
-            rsi = ta.rsi(close, length=14)
-            result["rsi"] = float(rsi.iloc[-1]) if rsi is not None and not rsi.empty else 50.0
-            result["rsi_ob"] = result["rsi"] > 70  # overbought
-            result["rsi_os"] = result["rsi"] < 30  # oversold
+            rsi_series = RSIIndicator(close=close, window=14).rsi()
+            rsi_val = _safe_last(rsi_series)
+            result["rsi"] = rsi_val if rsi_val is not None else 50.0
+            result["rsi_ob"] = result["rsi"] > 70
+            result["rsi_os"] = result["rsi"] < 30
 
             # ── Stochastic RSI ──
-            stoch_rsi = ta.stochrsi(close, length=14, rsi_length=14, k=3, d=3)
-            if stoch_rsi is not None and not stoch_rsi.empty:
-                k_col = [c for c in stoch_rsi.columns if "STOCHRSIk" in c]
-                d_col = [c for c in stoch_rsi.columns if "STOCHRSId" in c]
-                result["stoch_rsi_k"] = float(stoch_rsi[k_col[0]].iloc[-1]) if k_col else 50.0
-                result["stoch_rsi_d"] = float(stoch_rsi[d_col[0]].iloc[-1]) if d_col else 50.0
-            else:
-                result["stoch_rsi_k"] = 50.0
-                result["stoch_rsi_d"] = 50.0
+            stoch_rsi = StochRSIIndicator(close=close, window=14, smooth1=3, smooth2=3)
+            stoch_k = _safe_last(stoch_rsi.stochrsi_k())
+            stoch_d = _safe_last(stoch_rsi.stochrsi_d())
+            result["stoch_rsi_k"] = stoch_k if stoch_k is not None else 50.0
+            result["stoch_rsi_d"] = stoch_d if stoch_d is not None else 50.0
 
             # ── ADX ──
-            adx = ta.adx(high, low, close, length=14)
-            if adx is not None and not adx.empty:
-                adx_col = [c for c in adx.columns if c.startswith("ADX_")]
-                result["adx"] = float(adx[adx_col[0]].iloc[-1]) if adx_col else 20.0
-            else:
-                result["adx"] = 20.0
+            adx_ind = ADXIndicator(high=high, low=low, close=close, window=14)
+            adx_val = _safe_last(adx_ind.adx())
+            result["adx"] = adx_val if adx_val is not None else 20.0
             result["adx_trending"] = result["adx"] > 25
 
             # ── MACD ──
-            macd = ta.macd(close, fast=12, slow=26, signal=9)
-            if macd is not None and not macd.empty:
-                hist_col = [c for c in macd.columns if "MACDh" in c]
-                macd_col = [c for c in macd.columns if c.startswith("MACD_")]
-                signal_col = [c for c in macd.columns if "MACDs" in c]
-                result["macd_hist"] = float(macd[hist_col[0]].iloc[-1]) if hist_col else 0.0
-                result["macd_line"] = float(macd[macd_col[0]].iloc[-1]) if macd_col else 0.0
-                result["macd_signal"] = float(macd[signal_col[0]].iloc[-1]) if signal_col else 0.0
-                # Histogram growing in direction
-                if hist_col and len(macd) >= 2:
-                    prev_hist = macd[hist_col[0]].iloc[-2]
-                    curr_hist = macd[hist_col[0]].iloc[-1]
+            macd_ind = MACD(close=close, window_slow=26, window_fast=12, window_sign=9)
+            macd_hist_series = macd_ind.macd_diff()
+            macd_line_series = macd_ind.macd()
+            macd_signal_series = macd_ind.macd_signal()
+
+            macd_hist_val = _safe_last(macd_hist_series)
+            result["macd_hist"] = macd_hist_val if macd_hist_val is not None else 0.0
+            result["macd_line"] = _safe_last(macd_line_series) or 0.0
+            result["macd_signal"] = _safe_last(macd_signal_series) or 0.0
+
+            # Histogram growing in direction
+            if macd_hist_series is not None and len(macd_hist_series) >= 2:
+                prev_hist = macd_hist_series.iloc[-2]
+                curr_hist = macd_hist_series.iloc[-1]
+                if not (pd.isna(prev_hist) or pd.isna(curr_hist)):
                     result["macd_hist_growing_bull"] = bool(curr_hist > prev_hist and curr_hist > 0)
                     result["macd_hist_growing_bear"] = bool(curr_hist < prev_hist and curr_hist < 0)
                 else:
                     result["macd_hist_growing_bull"] = False
                     result["macd_hist_growing_bear"] = False
             else:
-                result["macd_hist"] = 0.0
-                result["macd_line"] = 0.0
-                result["macd_signal"] = 0.0
                 result["macd_hist_growing_bull"] = False
                 result["macd_hist_growing_bear"] = False
 
-            # ── WaveTrend ──
+            # ── WaveTrend (custom) ──
             wt1, wt2 = wavetrend(high, low, close)
             result["wavetrend_1"] = float(wt1.iloc[-1]) if not wt1.empty else 0.0
             result["wavetrend_2"] = float(wt2.iloc[-1]) if not wt2.empty else 0.0
@@ -179,37 +230,22 @@ class IndicatorCalculator:
                 result["wavetrend_bear_cross"] = False
 
             # ── ATR ──
-            atr = ta.atr(high, low, close, length=14)
-            result["atr"] = float(atr.iloc[-1]) if atr is not None and not atr.empty else 0.0
+            atr_series = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+            atr_val = _safe_last(atr_series)
+            result["atr"] = atr_val if atr_val is not None else 0.0
             result["atr_pct"] = (result["atr"] / latest * 100) if latest > 0 else 0.0
 
             # ── Bollinger Bands ──
-            bb = ta.bbands(close, length=20, std=2.0)
-            if bb is not None and not bb.empty:
-                bbu = [c for c in bb.columns if "BBU" in c]
-                bbl = [c for c in bb.columns if "BBL" in c]
-                bbm = [c for c in bb.columns if "BBM" in c]
-                result["bb_upper"] = float(bb[bbu[0]].iloc[-1]) if bbu else None
-                result["bb_lower"] = float(bb[bbl[0]].iloc[-1]) if bbl else None
-                result["bb_mid"] = float(bb[bbm[0]].iloc[-1]) if bbm else None
-                bb_width = [c for c in bb.columns if "BBB" in c]
-                result["bb_width"] = float(bb[bb_width[0]].iloc[-1]) if bb_width else None
-            else:
-                result["bb_upper"] = None
-                result["bb_lower"] = None
-                result["bb_mid"] = None
-                result["bb_width"] = None
+            bb = BollingerBands(close=close, window=20, window_dev=2)
+            result["bb_upper"] = _safe_last(bb.bollinger_hband())
+            result["bb_lower"] = _safe_last(bb.bollinger_lband())
+            result["bb_mid"] = _safe_last(bb.bollinger_mavg())
+            result["bb_width"] = _safe_last(bb.bollinger_wband())
 
             # ── Keltner Channels (for squeeze detection) ──
-            kc = ta.kc(high, low, close, length=20, scalar=1.5)
-            if kc is not None and not kc.empty:
-                kcu = [c for c in kc.columns if "KCU" in c]
-                kcl = [c for c in kc.columns if "KCL" in c]
-                result["kc_upper"] = float(kc[kcu[0]].iloc[-1]) if kcu else None
-                result["kc_lower"] = float(kc[kcl[0]].iloc[-1]) if kcl else None
-            else:
-                result["kc_upper"] = None
-                result["kc_lower"] = None
+            kc = KeltnerChannel(high=high, low=low, close=close, window=20, window_atr=20)
+            result["kc_upper"] = _safe_last(kc.keltner_channel_hband())
+            result["kc_lower"] = _safe_last(kc.keltner_channel_lband())
 
             # Squeeze detection: BB inside KC
             if (result["bb_upper"] and result["kc_upper"]
