@@ -106,6 +106,13 @@ class MLTradeLog(Base):
     vwap_z_score = Column(Float, nullable=True)            # std deviations from VWAP (equities)
     pending_wait_time_mins = Column(Float, nullable=True)  # time parked in pending memory before fill
 
+    # ── Quant Stack v7 ──
+    hmm_regime = Column(String(20), nullable=True)
+    meta_probability = Column(Float, nullable=True)
+    vol_multiplier = Column(Float, nullable=True)
+    har_rv_used = Column(Boolean, nullable=True, default=False)
+    orthogonal_weights = Column(JSON, nullable=True)
+
     __table_args__ = (
         Index("ix_ml_log_symbol_date", "symbol", "created_at"),
         Index("ix_ml_log_desk_date", "desk_id", "created_at"),

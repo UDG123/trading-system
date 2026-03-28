@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import DESKS
-from app.services.ohlcv_ingester import TD_MAP, CRYPTO_SYMBOLS, EQUITY_SYMBOLS, BINANCE_MAP
+from app.services.ohlcv_ingester import TD_MAP, CRYPTO_SYMBOLS, EQUITY_SYMBOLS, BYBIT_MAP
 from app.services.signal_engine.rate_limiter import RateLimiter
 
 logger = logging.getLogger("TradingSystem.SignalEngine.CandleManager")

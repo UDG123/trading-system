@@ -1,5 +1,5 @@
 """
-PriceService — On-Demand Price Fetch (TwelveData + Binance)
+PriceService — On-Demand Price Fetch (TwelveData + Bybit)
 Used by the pipeline to get a live market price at signal entry time.
 NOT a continuous feed. Single get_price() call per signal.
 
@@ -7,7 +7,7 @@ Also provides get_prices_batch() for the sim exit checker to fetch
 all open-position prices in a SINGLE TwelveData API call.
 
 Routing:
-  Single price: Crypto → Binance REST (no key, 1 call)
+  Single price: Crypto → Bybit REST (no key, 1 call)
                 Everything else → TwelveData (1 credit)
   Batch prices: ALL symbols → TwelveData multi-symbol (1 credit total)
 """
@@ -53,7 +53,7 @@ TD_MAP = {
     "GOOGL": "GOOGL", "NFLX": "NFLX", "AMD": "AMD",
 }
 
-BINANCE_MAP = {
+BYBIT_MAP = {
     "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT",
     "SOLUSD": "SOLUSDT", "XRPUSD": "XRPUSDT", "LINKUSD": "LINKUSDT",
 }
@@ -74,13 +74,13 @@ class PriceService:
     async def get_price(self, symbol: str) -> Optional[float]:
         """
         Fetch a single live price. Routes to the best provider by asset class.
-        Crypto → Binance REST. Everything else → TwelveData.
+        Crypto → Bybit REST. Everything else → TwelveData.
         Returns None if provider fails.
         """
         sym = symbol.upper()
 
         if sym in CRYPTO:
-            return await self._binance(sym)
+            return await self._bybit(sym)
         else:
             return await self._twelvedata(sym)
 
@@ -165,21 +165,23 @@ class PriceService:
             pass
         return None
 
-    async def _binance(self, symbol: str) -> Optional[float]:
-        """Binance REST single-symbol price (crypto, no key needed)."""
-        binance_sym = BINANCE_MAP.get(symbol)
-        if not binance_sym:
+    async def _bybit(self, symbol: str) -> Optional[float]:
+        """Bybit REST single-symbol price (crypto, no key needed)."""
+        bybit_sym = BYBIT_MAP.get(symbol)
+        if not bybit_sym:
             return None
         try:
             resp = await self.client.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": binance_sym},
+                "https://api.bybit.com/v5/market/tickers",
+                params={"category": "spot", "symbol": bybit_sym},
             )
             if resp.status_code == 200:
                 data = resp.json()
-                price = float(data.get("price", 0))
-                if price > 0:
-                    return price
+                result_list = data.get("result", {}).get("list", [])
+                if result_list:
+                    price = float(result_list[0].get("lastPrice", 0))
+                    if price > 0:
+                        return price
         except (httpx.TimeoutException, httpx.RequestError):
             pass
         return None

@@ -91,6 +91,25 @@ class ShadowSignal(Base):
     # ── Meta-label ──
     meta_label = Column(Boolean)            # TRUE = profitable
 
+    # ── HMM Regime Detection ──
+    hmm_regime = Column(String(20))
+    hmm_confidence = Column(Float)
+    hmm_state_probs = Column(JSONB)
+
+    # ── Meta-labeling ──
+    meta_probability = Column(Float)
+    meta_should_trade = Column(Boolean)
+    meta_bet_size = Column(Float)
+
+    # ── Volatility Targeting ──
+    vol_multiplier = Column(Float)
+    realized_vol = Column(Float)
+    vol_method = Column(String(20))
+
+    # ── HAR-RV ──
+    har_rv_forecast = Column(Float)
+    har_rv_r_squared = Column(Float)
+
     # ── Raw data ──
     raw_payload = Column(JSONB)
     enrichment_data = Column(JSONB)

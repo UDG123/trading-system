@@ -201,6 +201,8 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             logger.debug(f"Dedup check failed for {desk_id}, proceeding: {e}")
 
         try:
+            vix_size_modifier = 1.0  # initialized early for regime/VIX adjustments
+
             # ── 2. Enrich with market data ──
             signal.status = "ENRICHING"
             db.commit()
@@ -234,6 +236,36 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
 
             signal.status = "ENRICHED"
             db.commit()
+
+            # ── 2a-q. HMM Regime Detection (optional — replaces binary Hurst gate) ──
+            regime_info = None
+            try:
+                from app.services.regime_detector import RegimeDetector
+                _regime = RegimeDetector()
+                regime_info = _regime.get_regime_for_symbol(signal.symbol_normalized, db)
+                if regime_info and regime_info.get("regime") != "UNKNOWN":
+                    enrichment["hmm_regime"] = regime_info["regime"]
+                    enrichment["hmm_confidence"] = regime_info.get("confidence", 0)
+                    logger.info(
+                        f"REGIME | {desk_id} | {signal.symbol_normalized} | "
+                        f"{regime_info['regime']} (conf={regime_info.get('confidence', 0):.2f})"
+                    )
+                    # Mean-reverting regime: suppress trend signals on swing/intraday
+                    if (regime_info["regime"] == "MEAN_REVERTING"
+                            and regime_info.get("confidence", 0) > 0.6
+                            and desk_id in ("DESK2_INTRADAY", "DESK3_SWING")):
+                        signal.status = "SKIPPED_REGIME"
+                        db.commit()
+                        results[desk_id] = {
+                            "decision": "SKIP", "approved": False,
+                            "rejection_reason": f"HMM regime: MEAN_REVERTING (conf={regime_info['confidence']:.2f})",
+                        }
+                        continue
+                    # Volatile regime: reduce sizing
+                    if regime_info["regime"] == "VOLATILE":
+                        vix_size_modifier *= 0.7
+            except Exception as e:
+                logger.debug(f"Regime detection skipped: {e}")
 
             # ── 2b. Fetch LIVE market price (replaces TradingView candle close) ──
             try:
@@ -486,6 +518,69 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             _reasoning = decision.get("reasoning", "")
             signal.claude_reasoning = _reasoning[:997] + "..." if len(_reasoning) > 1000 else _reasoning
 
+            # ── 7b. Meta-labeler filter (optional) ──
+            meta_result = None
+            if decision.get("decision") in ("EXECUTE", "REDUCE"):
+                try:
+                    from app.services.meta_labeler import MetaLabeler
+                    _meta = MetaLabeler()
+                    now_utc = datetime.now(timezone.utc)
+                    meta_features = {
+                        "consensus_score": consensus.get("total_score", 0),
+                        "ml_score": ml_result.get("ml_score", 0),
+                        "hurst": enrichment.get("hurst_exponent", 0.5),
+                        "rsi": enrichment.get("rsi", 50),
+                        "adx": enrichment.get("adx", 20),
+                        "atr_pct": enrichment.get("atr_pct", 0),
+                        "rvol": enrichment.get("mse_rvol", 1),
+                        "hour_utc": now_utc.hour,
+                        "day_of_week": now_utc.weekday(),
+                        "vix_level": enrichment.get("intermarket", {}).get("VIX", {}).get("price", 20),
+                    }
+                    meta_result = _meta.predict(meta_features)
+                    if not meta_result.get("should_trade", True):
+                        decision = {
+                            "decision": "SKIP",
+                            "size_multiplier": 0.0,
+                            "reasoning": f"Meta-label filter: P(correct)={meta_result['meta_probability']:.2f} < 0.55",
+                            "risk_flags": ["meta_label_filter"],
+                            "confidence": 0.0,
+                        }
+                        signal.claude_decision = "SKIP"
+                        signal.claude_reasoning = decision["reasoning"]
+                        logger.info(
+                            f"META FILTER | {desk_id} | {signal.symbol_normalized} | "
+                            f"P={meta_result['meta_probability']:.2f} — signal filtered"
+                        )
+                    elif meta_result.get("bet_size", 1.0) < 1.0:
+                        # Reduce size based on meta confidence
+                        bet_mult = meta_result["bet_size"]
+                        if decision.get("size_multiplier"):
+                            decision["size_multiplier"] = round(
+                                decision["size_multiplier"] * bet_mult, 4
+                            )
+                except Exception as e:
+                    logger.debug(f"Meta-labeler skipped: {e}")
+
+            # ── 7c. Volatility targeting (optional) ──
+            vol_result = None
+            try:
+                from app.services.volatility_targeter import VolatilityTargeter
+                _vol = VolatilityTargeter()
+                desk_base_risk = DESKS.get(desk_id, {}).get("risk_pct", 1.0)
+                vol_result = _vol.compute_target_size(
+                    signal.symbol_normalized, desk_id, desk_base_risk, db
+                )
+                if vol_result and vol_result.get("vol_multiplier", 1.0) != 1.0:
+                    logger.info(
+                        f"VOL TARGET | {desk_id} | {signal.symbol_normalized} | "
+                        f"Realized={vol_result.get('realized_vol', '?')} "
+                        f"Target={vol_result.get('target_vol', '?')} "
+                        f"Multiplier={vol_result.get('vol_multiplier', 1.0)}"
+                    )
+            except Exception as e:
+                logger.debug(f"Vol targeting skipped: {e}")
+
             # ── 8. Risk flags (advisory only — does NOT block trades) ──
             risk_flags = []
             session_ok, session_msg = risk_filter._check_session(desk_id, DESKS.get(desk_id, {}))
@@ -504,7 +599,11 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             risk_pct = desk.get("risk_pct", 1.0)
             size_mult = decision.get("size_multiplier", 1.0)
             desk_modifier = desk_state.get("size_modifier", 1.0)
-            effective_risk_pct = min(risk_pct * size_mult * desk_modifier * vix_size_modifier, risk_pct)
+            # Apply volatility targeting multiplier if available
+            vol_mult = vol_result.get("vol_multiplier", 1.0) if vol_result else 1.0
+            effective_risk_pct = min(
+                risk_pct * size_mult * desk_modifier * vix_size_modifier * vol_mult, risk_pct
+            )
 
             # ── 8c. Portfolio-level risk cap ──
             portfolio_ok, portfolio_msg = risk_filter.check_portfolio_limits(
