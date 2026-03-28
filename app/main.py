@@ -406,6 +406,114 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Signal Engine disabled (SIGNAL_SOURCE={SIGNAL_SOURCE})")
 
+    # ── Quant Stack Scheduled Jobs ──
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        # HMM Regime Detector — daily retraining at 00:05 UTC
+        async def _train_regime_detector():
+            try:
+                from app.services.regime_detector import RegimeDetector
+                detector = RegimeDetector(redis_pool=_redis_pool)
+                db = SessionLocal()
+                try:
+                    result = await detector.train_all(db)
+                    logger.info(f"HMM regime training: {result}")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Regime training error: {e}")
+
+        _scheduler.add_job(
+            _train_regime_detector,
+            trigger=CronTrigger(hour=0, minute=5, timezone="UTC"),
+            id="hmm_regime_train",
+            name="HMM Regime Detector (daily 00:05 UTC)",
+            replace_existing=True,
+        )
+
+        # Meta-Labeler — weekly retraining Sunday 00:10 UTC
+        async def _train_meta_labeler():
+            try:
+                from app.services.meta_labeler import MetaLabeler
+                ml = MetaLabeler()
+                db = SessionLocal()
+                try:
+                    result = ml.train(db)
+                    logger.info(f"Meta-labeler training: {result}")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Meta-labeler training error: {e}")
+
+        _scheduler.add_job(
+            _train_meta_labeler,
+            trigger=CronTrigger(day_of_week="sun", hour=0, minute=10, timezone="UTC"),
+            id="meta_labeler_train",
+            name="Meta-Labeler (weekly Sun 00:10 UTC)",
+            replace_existing=True,
+        )
+
+        # Factor Monitor — hourly concentration check
+        async def _check_factors():
+            try:
+                from app.services.factor_monitor import FactorMonitor
+                fm = FactorMonitor()
+                db = SessionLocal()
+                try:
+                    result = fm.check_concentration(db)
+                    if result.get("concentration_warning"):
+                        from app.services.telegram_bot import TelegramBot
+                        tg = TelegramBot()
+                        await tg._send_to_system(
+                            f"⚠️ FACTOR CONCENTRATION ALERT\n"
+                            f"Dominant: {result.get('dominant_factor')}\n"
+                            f"Cross-desk corr: {result.get('cross_desk_correlation')}\n"
+                            f"Action: {result.get('recommendation')}"
+                        )
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"Factor monitor error: {e}")
+
+        _scheduler.add_job(
+            _check_factors,
+            trigger=IntervalTrigger(minutes=60),
+            id="factor_monitor",
+            name="Factor Monitor (hourly)",
+            replace_existing=True,
+        )
+
+        # FRED macro fetch — daily at 14:00 UTC
+        async def _fetch_fred():
+            try:
+                from app.services.fred_service import FREDService
+                fred = FREDService(redis_pool=_redis_pool)
+                try:
+                    vix = await fred.get_vix()
+                    dxy = await fred.get_dxy()
+                    logger.info(f"FRED fetch: VIX={vix}, DXY={dxy}")
+                finally:
+                    await fred.close()
+            except Exception as e:
+                logger.debug(f"FRED fetch error: {e}")
+
+        _scheduler.add_job(
+            _fetch_fred,
+            trigger=CronTrigger(hour=14, minute=0, timezone="UTC"),
+            id="fred_daily",
+            name="FRED Daily Macro (14:00 UTC)",
+            replace_existing=True,
+        )
+
+        logger.info(
+            "Quant stack jobs registered: "
+            "HMM daily | Meta-labeler weekly | Factor monitor hourly | FRED daily"
+        )
+    except Exception as e:
+        logger.error(f"Quant stack scheduler jobs failed: {e}")
+
     yield
 
     # Cancel background tasks

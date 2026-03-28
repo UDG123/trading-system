@@ -1,6 +1,6 @@
 """
 OHLCV Ingester — Fetches and stores historical OHLCV data from
-TwelveData and Binance (crypto) into ohlcv_1m.
+TwelveData and Bybit (crypto) into ohlcv_1m.
 """
 import os
 import asyncio
@@ -39,9 +39,15 @@ TD_MAP = {
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "LINKUSD"}
 EQUITY_SYMBOLS = {"TSLA", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "NFLX", "AMD"}
 
-BINANCE_MAP = {
+BYBIT_MAP = {
     "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT",
     "SOLUSD": "SOLUSDT", "XRPUSD": "XRPUSDT", "LINKUSD": "LINKUSDT",
+}
+
+# Bybit kline interval mapping
+BYBIT_INTERVAL_MAP = {
+    "1m": "1", "5m": "5", "15m": "15",
+    "1h": "60", "4h": "240", "1d": "D",
 }
 
 
@@ -60,7 +66,7 @@ class OHLCVIngester:
         start = end - timedelta(days=days_back)
 
         if symbol in CRYPTO_SYMBOLS:
-            bars = await self._fetch_binance_klines(symbol, "1m", start, end)
+            bars = await self._fetch_bybit_klines(symbol, "1m", start, end)
         elif symbol in EQUITY_SYMBOLS:
             bars = await self._fetch_twelvedata(symbol, "1min", start, end)
         else:
@@ -105,7 +111,7 @@ class OHLCVIngester:
             chunk_end = min(current + timedelta(days=chunk_days), end_date)
             try:
                 if symbol in CRYPTO_SYMBOLS:
-                    bars = await self._fetch_binance_klines(symbol, "1m", current, chunk_end)
+                    bars = await self._fetch_bybit_klines(symbol, "1m", current, chunk_end)
                 else:
                     bars = await self._fetch_twelvedata(symbol, "1min", current, chunk_end)
 
@@ -126,10 +132,10 @@ class OHLCVIngester:
     ) -> int:
         """Fetch the N most recent bars for a symbol using outputsize. Returns bars inserted."""
         if symbol in CRYPTO_SYMBOLS:
-            # Binance: fetch last N minutes
+            # Bybit: fetch last N minutes
             end = datetime.now(timezone.utc)
             start = end - timedelta(minutes=outputsize + 1)
-            bars = await self._fetch_binance_klines(symbol, "1m", start, end)
+            bars = await self._fetch_bybit_klines(symbol, "1m", start, end)
         else:
             bars = await self._fetch_twelvedata_recent(symbol, interval, outputsize)
 
@@ -215,33 +221,39 @@ class OHLCVIngester:
 
         return bars
 
-    async def _fetch_binance_klines(
+    async def _fetch_bybit_klines(
         self, symbol: str, interval: str, start: datetime, end: datetime
     ) -> List[Dict]:
-        """Fetch from Binance klines endpoint."""
-        binance_sym = BINANCE_MAP.get(symbol)
-        if not binance_sym:
+        """Fetch from Bybit v5 kline endpoint (crypto, no auth needed)."""
+        bybit_sym = BYBIT_MAP.get(symbol)
+        if not bybit_sym:
             return []
 
+        bybit_interval = BYBIT_INTERVAL_MAP.get(interval, "1")
         bars = []
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
 
         try:
             resp = await self.client.get(
-                "https://api.binance.com/api/v3/klines",
+                "https://api.bybit.com/v5/market/kline",
                 params={
-                    "symbol": binance_sym,
-                    "interval": interval,
-                    "startTime": start_ms,
-                    "endTime": end_ms,
+                    "category": "spot",
+                    "symbol": bybit_sym,
+                    "interval": bybit_interval,
+                    "start": start_ms,
+                    "end": end_ms,
                     "limit": 1000,
                 },
             )
             if resp.status_code == 200:
-                for k in resp.json():
+                data = resp.json()
+                result_list = data.get("result", {}).get("list", [])
+                # Bybit returns [startTime, open, high, low, close, volume, turnover]
+                # in DESCENDING order — reverse to get oldest first
+                for k in reversed(result_list):
                     bars.append({
-                        "time": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc).strftime(
+                        "time": datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).strftime(
                             "%Y-%m-%d %H:%M:%S"
                         ),
                         "open": float(k[1]),
@@ -251,7 +263,7 @@ class OHLCVIngester:
                         "volume": float(k[5]),
                     })
         except Exception as e:
-            logger.debug(f"Binance fetch failed for {symbol}: {e}")
+            logger.debug(f"Bybit fetch failed for {symbol}: {e}")
 
         return bars
 
@@ -302,7 +314,7 @@ class OHLCVIngester:
                     for symbol in all_symbols:
                         try:
                             if symbol in CRYPTO_SYMBOLS:
-                                bars = await self._fetch_binance_klines(
+                                bars = await self._fetch_bybit_klines(
                                     symbol, "1m",
                                     datetime.now(timezone.utc) - timedelta(minutes=2),
                                     datetime.now(timezone.utc),

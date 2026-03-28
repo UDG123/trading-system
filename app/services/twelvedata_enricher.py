@@ -323,12 +323,34 @@ class TwelveDataEnricher:
         return atr_data, rsi_data, adx_data, quote_data, ema50_data, ema200_data
 
     async def _fetch_intermarket(self) -> Dict:
-        """Fetch intermarket snapshot: DXY, VIX, bonds, oil."""
+        """Fetch intermarket snapshot: DXY, VIX, bonds, oil.
+        Tries FRED first for DXY and VIX to save TwelveData credits.
+        """
         result = {}
+
+        # Try FRED first for VIX and DXY (saves 2 TwelveData credits per cycle)
+        try:
+            from app.services.fred_service import FREDService
+            fred = FREDService(redis_pool=getattr(self, '_redis', None))
+            try:
+                vix_val = await fred.get_vix()
+                if vix_val is not None:
+                    result["VIX"] = {"price": vix_val, "change_pct": 0}
+                dxy_val = await fred.get_dxy()
+                if dxy_val is not None:
+                    result["DXY"] = {"price": dxy_val, "change_pct": 0}
+            finally:
+                await fred.close()
+        except Exception:
+            pass
+
         if not self.api_key:
             return result
 
+        # Fetch remaining instruments (and fallback for VIX/DXY) from TwelveData
         for name, symbol in INTERMARKET.items():
+            if name in result:
+                continue  # Already fetched from FRED
             try:
                 resp = await self.client.get(
                     f"{BASE_URL}/quote",

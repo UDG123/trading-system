@@ -29,10 +29,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
-BINANCE_REST_URL = "https://api.binance.com"
-BINANCE_WS_ENABLED = os.getenv("BINANCE_WS_ENABLED", "true").lower() in ("true", "1", "yes")
+BYBIT_REST_URL = "https://api.bybit.com"
+BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/spot"
+BYBIT_WS_ENABLED = os.getenv("BYBIT_WS_ENABLED", "true").lower() in ("true", "1", "yes")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
 # Signal source: TV_ONLY | PYTHON_ONLY | BOTH (shadow/validation mode)
 SIGNAL_SOURCE = os.getenv("SIGNAL_SOURCE", "BOTH")
