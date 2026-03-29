@@ -329,15 +329,33 @@ class VirtualBroker:
         else:
             return "POST_NY"
 
+    # ── Zombie trade time limits (minutes) for 0.5R check ──
+    ZOMBIE_LIMITS = {
+        "DESK1_SCALPER": 50,
+        "DESK2_INTRADAY": 240,
+        "DESK3_SWING": 4320,       # 3 days
+        "DESK4_GOLD": 120,
+        "DESK5_ALTS": 360,
+        "DESK6_EQUITIES": 1440,    # 1 day
+    }
+
     async def check_exits(
         self, db: Session, current_prices: Dict[str, float]
     ) -> List[Dict]:
-        """Check all open positions for exit conditions."""
+        """
+        Three-tier partial profit exit system.
+
+        Tier 1: Close 33% at 1R, move SL to breakeven.
+        Tier 2: Close 33% at 3R, trail SL to 1R level.
+        Tier 3: Trail remaining 34% with chandelier stop
+                (highest_high(22) - ATR(14)*3 for longs).
+        Plus zombie trade time-based exits.
+        """
         closed = []
 
         open_positions = (
             db.query(SimPosition)
-            .filter(SimPosition.status == "OPEN")
+            .filter(SimPosition.status.in_(["OPEN", "PARTIAL"]))
             .all()
         )
 
@@ -351,32 +369,41 @@ class VirtualBroker:
                 continue
 
             direction = pos.direction.upper()
+            entry = pos.entry_price
+            original_sl = pos.stop_loss or entry  # fallback
 
-            # Update current price and unrealized PnL
+            # Risk distance (1R) in price terms
+            risk_distance = abs(entry - original_sl) if original_sl else 0
+            if risk_distance <= 0:
+                risk_distance = entry * 0.01  # 1% fallback
+
+            # Current pips
             if direction == "LONG":
-                unrealized_pips = (price - pos.entry_price) / pip_size
+                unrealized_pips = (price - entry) / pip_size
             else:
-                unrealized_pips = (pos.entry_price - price) / pip_size
+                unrealized_pips = (entry - price) / pip_size
 
             pos.current_price = price
             pos.unrealized_pnl = round(unrealized_pips * pip_value * pos.lot_size, 2)
 
             # Update MFE/MAE
             if direction == "LONG":
-                fav = (price - pos.entry_price) / pip_size
-                adv = (pos.entry_price - price) / pip_size
+                fav = (price - entry) / pip_size
+                adv = (entry - price) / pip_size
             else:
-                fav = (pos.entry_price - price) / pip_size
-                adv = (price - pos.entry_price) / pip_size
-
+                fav = (entry - price) / pip_size
+                adv = (price - entry) / pip_size
             pos.max_favorable_pips = max(pos.max_favorable_pips or 0, fav)
             pos.max_adverse_pips = max(pos.max_adverse_pips or 0, adv)
 
-            # Check exit conditions
+            # Current R-multiple
+            current_r = unrealized_pips * pip_size / risk_distance if risk_distance > 0 else 0
+
+            partial_pct = pos.partial_close_pct or 0
             exit_reason = None
             exit_price = None
 
-            # SL hit
+            # ── SL hit (always checked first) ──
             if pos.stop_loss:
                 if direction == "LONG" and price <= pos.stop_loss:
                     exit_reason = "SL_HIT"
@@ -385,98 +412,212 @@ class VirtualBroker:
                     exit_reason = "SL_HIT"
                     exit_price = pos.stop_loss
 
-            # TP1 hit — partial close 50%
-            if not exit_reason and pos.take_profit_1 and not pos.partial_close_pct:
-                if direction == "LONG" and price >= pos.take_profit_1:
-                    pos.partial_close_pct = 50.0
-                    partial_pips = (pos.take_profit_1 - pos.entry_price) / pip_size
-                    pos.partial_pnl = round(partial_pips * pip_value * pos.lot_size * 0.5, 2)
+            # ── Tier 1: Close 33% at 1R, move SL to breakeven ──
+            if not exit_reason and partial_pct < 33:
+                tier1_target = entry + risk_distance if direction == "LONG" else entry - risk_distance
+                hit = (direction == "LONG" and price >= tier1_target) or \
+                      (direction == "SHORT" and price <= tier1_target)
+                if hit:
+                    tier1_pips = risk_distance / pip_size  # 1R in pips
+                    tier1_pnl = round(tier1_pips * pip_value * pos.lot_size * 0.33, 2)
+                    pos.partial_close_pct = 33.0
+                    pos.partial_pnl = (pos.partial_pnl or 0) + tier1_pnl
+                    pos.partial_pnl_tier1 = tier1_pnl
                     # Move SL to breakeven
-                    pos.breakeven_price = pos.entry_price
-                    pos.stop_loss = pos.entry_price
+                    pos.stop_loss = entry
+                    pos.breakeven_price = entry
                     pos.status = "PARTIAL"
-                elif direction == "SHORT" and price <= pos.take_profit_1:
-                    pos.partial_close_pct = 50.0
-                    partial_pips = (pos.entry_price - pos.take_profit_1) / pip_size
-                    pos.partial_pnl = round(partial_pips * pip_value * pos.lot_size * 0.5, 2)
-                    pos.breakeven_price = pos.entry_price
-                    pos.stop_loss = pos.entry_price
+                    logger.debug(
+                        f"TIER1 | {pos.symbol} {direction} | 33% closed at 1R | "
+                        f"PnL: ${tier1_pnl} | SL→BE"
+                    )
+
+            # ── Tier 2: Close 33% at 3R, trail SL to 1R level ──
+            if not exit_reason and 33 <= partial_pct < 66:
+                tier2_target = entry + (risk_distance * 3) if direction == "LONG" else entry - (risk_distance * 3)
+                hit = (direction == "LONG" and price >= tier2_target) or \
+                      (direction == "SHORT" and price <= tier2_target)
+                if hit:
+                    tier2_pips = (risk_distance * 3) / pip_size
+                    tier2_pnl = round(tier2_pips * pip_value * pos.lot_size * 0.33, 2)
+                    pos.partial_close_pct = 66.0
+                    pos.partial_pnl = (pos.partial_pnl or 0) + tier2_pnl
+                    pos.partial_pnl_tier2 = tier2_pnl
+                    # Trail SL to 1R profit level
+                    if direction == "LONG":
+                        pos.stop_loss = entry + risk_distance
+                    else:
+                        pos.stop_loss = entry - risk_distance
                     pos.status = "PARTIAL"
+                    logger.debug(
+                        f"TIER2 | {pos.symbol} {direction} | 33% closed at 3R | "
+                        f"PnL: ${tier2_pnl} | SL→1R"
+                    )
 
-            # TP2 hit — close remaining
-            if not exit_reason and pos.take_profit_2:
-                if direction == "LONG" and price >= pos.take_profit_2:
-                    exit_reason = "TP2_HIT"
-                    exit_price = pos.take_profit_2
-                elif direction == "SHORT" and price <= pos.take_profit_2:
-                    exit_reason = "TP2_HIT"
-                    exit_price = pos.take_profit_2
+            # ── Tier 3: Trail remaining 34% with chandelier stop ──
+            if not exit_reason and partial_pct >= 66:
+                chandelier_stop = self._compute_chandelier_stop(
+                    pos.symbol, direction, db
+                )
+                if chandelier_stop:
+                    pos.trailing_stop = chandelier_stop
+                    if direction == "LONG" and price <= chandelier_stop:
+                        exit_reason = "TRAILING_T3"
+                        exit_price = chandelier_stop
+                        pos.exit_tier = 3
+                    elif direction == "SHORT" and price >= chandelier_stop:
+                        exit_reason = "TRAILING_T3"
+                        exit_price = chandelier_stop
+                        pos.exit_tier = 3
 
-            # Trailing stop
-            if not exit_reason and pos.trailing_stop:
-                if direction == "LONG" and price <= pos.trailing_stop:
-                    exit_reason = "TRAILING"
-                    exit_price = pos.trailing_stop
-                elif direction == "SHORT" and price >= pos.trailing_stop:
-                    exit_reason = "TRAILING"
-                    exit_price = pos.trailing_stop
+            # ── Zombie trade time-based exit ──
+            if not exit_reason and pos.entry_time:
+                zombie_limit = self.ZOMBIE_LIMITS.get(pos.desk_id, 1440)
+                hold_mins = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+                if hold_mins >= zombie_limit and current_r < 0.5:
+                    exit_reason = "ZOMBIE_EXIT"
+                    exit_price = price
+                    pos.time_based_exit = True
+                    logger.debug(
+                        f"ZOMBIE | {pos.symbol} {direction} | {hold_mins:.0f}min | "
+                        f"R={current_r:.2f} < 0.5R — closing"
+                    )
 
-            # Time exit
+            # ── Hard time exit (desk max_hold_hours) ──
             if not exit_reason and pos.entry_time:
                 desk = DESKS.get(pos.desk_id, {})
                 max_hold = desk.get("max_hold_hours", 24)
                 if datetime.now(timezone.utc) - pos.entry_time > timedelta(hours=max_hold):
                     exit_reason = "TIME_EXIT"
                     exit_price = price
+                    pos.time_based_exit = True
 
-            # Close position if exit triggered
+            # ── Close position if full exit triggered ──
             if exit_reason:
-                exit_price = exit_price or price
-                if direction == "LONG":
-                    pnl_pips = (exit_price - pos.entry_price) / pip_size
-                else:
-                    pnl_pips = (pos.entry_price - exit_price) / pip_size
-
-                # Account for partial close
-                remaining_pct = 1.0 - (pos.partial_close_pct or 0) / 100
-                pnl_dollars = round(pnl_pips * pip_value * pos.lot_size * remaining_pct, 2)
-                total_pnl = pnl_dollars + (pos.partial_pnl or 0)
-                hold_minutes = 0.0
-                if pos.entry_time:
-                    hold_minutes = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
-
-                pos.exit_price = exit_price
-                pos.exit_time = datetime.now(timezone.utc)
                 pos.exit_reason = exit_reason
-                pos.realized_pnl_pips = round(pnl_pips, 2)
-                pos.realized_pnl_dollars = pnl_dollars
-                pos.hold_time_minutes = round(hold_minutes, 1)
-                pos.commission_total = 0.0  # Already deducted at order
-                pos.swap_total = 0.0
-                pos.net_pnl = total_pnl
-                pos.status = "CLOSED"
-
-                # Update profile balance
-                profile = db.query(SimProfile).filter(SimProfile.id == pos.profile_id).first()
-                if profile:
-                    profile.current_balance += total_pnl
-
-                closed.append({
-                    "position_id": pos.id,
-                    "profile_id": pos.profile_id,
-                    "symbol": pos.symbol,
-                    "direction": pos.direction,
-                    "exit_reason": exit_reason,
-                    "pnl_pips": round(pnl_pips, 2),
-                    "pnl_dollars": total_pnl,
-                    "hold_minutes": round(hold_minutes, 1),
-                })
+                if not pos.exit_tier:
+                    if exit_reason == "SL_HIT" and partial_pct < 33:
+                        pos.exit_tier = 0  # never made it to tier 1
+                    elif exit_reason == "SL_HIT" and partial_pct < 66:
+                        pos.exit_tier = 1
+                    elif exit_reason == "SL_HIT":
+                        pos.exit_tier = 2
+                result = self._close_position(pos, exit_price or price, pip_size, pip_value, db)
+                closed.append(result)
 
         if closed:
             db.flush()
             logger.debug(f"Sim exits: {len(closed)} positions closed")
 
         return closed
+
+    def _close_position(
+        self, pos: SimPosition, exit_price: float,
+        pip_size: float, pip_value: float, db: Session,
+    ) -> Dict:
+        """Finalize position close with partial PnL accounting."""
+        direction = pos.direction.upper()
+
+        if direction == "LONG":
+            pnl_pips = (exit_price - pos.entry_price) / pip_size
+        else:
+            pnl_pips = (pos.entry_price - exit_price) / pip_size
+
+        remaining_pct = 1.0 - (pos.partial_close_pct or 0) / 100
+        final_pnl = round(pnl_pips * pip_value * pos.lot_size * remaining_pct, 2)
+        total_pnl = final_pnl + (pos.partial_pnl or 0)
+
+        # Store tier 3 PnL if this is the trailing close of the last 34%
+        if pos.partial_close_pct and pos.partial_close_pct >= 66:
+            pos.partial_pnl_tier3 = final_pnl
+            if not pos.exit_tier:
+                pos.exit_tier = 3
+
+        hold_minutes = 0.0
+        if pos.entry_time:
+            hold_minutes = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+
+        pos.exit_price = exit_price
+        pos.exit_time = datetime.now(timezone.utc)
+        # exit_reason already set on pos by check_exits before calling this method
+        pos.realized_pnl_pips = round(pnl_pips, 2)
+        pos.realized_pnl_dollars = final_pnl
+        pos.hold_time_minutes = round(hold_minutes, 1)
+        pos.commission_total = 0.0
+        pos.swap_total = 0.0
+        pos.net_pnl = round(total_pnl, 2)
+        pos.status = "CLOSED"
+
+        # Update profile balance
+        profile = db.query(SimProfile).filter(SimProfile.id == pos.profile_id).first()
+        if profile:
+            profile.current_balance += total_pnl
+
+        return {
+            "position_id": pos.id,
+            "profile_id": pos.profile_id,
+            "symbol": pos.symbol,
+            "direction": pos.direction,
+            "exit_reason": pos.exit_reason,
+            "exit_tier": pos.exit_tier,
+            "pnl_pips": round(pnl_pips, 2),
+            "pnl_dollars": round(total_pnl, 2),
+            "tier1_pnl": pos.partial_pnl_tier1,
+            "tier2_pnl": pos.partial_pnl_tier2,
+            "tier3_pnl": pos.partial_pnl_tier3,
+            "time_based": pos.time_based_exit or False,
+            "hold_minutes": round(hold_minutes, 1),
+        }
+
+    def _compute_chandelier_stop(
+        self, symbol: str, direction: str, db: Session,
+        lookback: int = 22, atr_mult: float = 3.0,
+    ) -> Optional[float]:
+        """
+        Chandelier stop for Tier 3 trailing.
+        Long:  highest_high(22) - ATR(14) * 3.0
+        Short: lowest_low(22) + ATR(14) * 3.0
+        """
+        try:
+            from sqlalchemy import text
+            # Use 1H candles for chandelier computation
+            rows = db.execute(
+                text("""
+                    SELECT high, low, close FROM ohlcv_1h
+                    WHERE symbol = :sym
+                    ORDER BY time DESC
+                    LIMIT :n
+                """),
+                {"sym": symbol, "n": lookback + 14},
+            ).fetchall()
+
+            if not rows or len(rows) < lookback:
+                return None
+
+            import numpy as np
+            highs = np.array([float(r[0]) for r in reversed(rows)])
+            lows = np.array([float(r[1]) for r in reversed(rows)])
+            closes = np.array([float(r[2]) for r in reversed(rows)])
+
+            # ATR(14)
+            tr = np.maximum(
+                highs[1:] - lows[1:],
+                np.maximum(
+                    np.abs(highs[1:] - closes[:-1]),
+                    np.abs(lows[1:] - closes[:-1]),
+                ),
+            )
+            atr = float(np.mean(tr[-14:])) if len(tr) >= 14 else float(np.mean(tr))
+
+            if direction == "LONG":
+                highest = float(np.max(highs[-lookback:]))
+                return round(highest - atr * atr_mult, 5)
+            else:
+                lowest = float(np.min(lows[-lookback:]))
+                return round(lowest + atr * atr_mult, 5)
+
+        except Exception:
+            return None
 
     async def take_equity_snapshot(self, db: Session) -> None:
         """Take equity snapshots for all active profiles."""

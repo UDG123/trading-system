@@ -182,6 +182,19 @@ async def lifespan(app: FastAPI):
         conn.commit()
         logger.info("Quant stack columns verified (shadow_signals + ml_trade_logs)")
 
+    # Sim positions: 3-tier partial exit columns
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS exit_tier INTEGER",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier1 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier2 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier3 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS time_based_exit BOOLEAN DEFAULT FALSE",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("Sim 3-tier exit columns verified (sim_positions)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
