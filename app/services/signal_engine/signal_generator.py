@@ -11,11 +11,12 @@ from typing import Dict, List, Optional
 
 from app.config import (
     DESKS, VALID_ALERT_TYPES, SESSION_WINDOWS,
-    get_desk_for_symbol, get_atr_settings,
+    get_desk_for_symbol, get_atr_settings, MTF_SCORING,
 )
 from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.smc_analyzer import SMCAnalyzer
 from app.services.signal_engine.confluence_scorer import ConfluenceScorer, CONFLUENCE_THRESHOLD
+from app.services.signal_engine.mtf_confluence import MTFConfluenceScorer
 from app.services.signal_engine.candle_manager import CandleManager
 from app.services.signal_engine.market_hours_filter import (
     is_valid_trading_hour, get_gold_confidence_boost,
@@ -77,7 +78,71 @@ class SignalGenerator:
             # Only generate signals from entry timeframe
             return None
 
-        # Get indicators for confirmation and bias timeframes
+        # ── Scoring: WEIGHTED (new continuous) vs LEGACY (old binary) ──
+        if MTF_SCORING == "WEIGHTED":
+            return self._evaluate_weighted(
+                symbol, timeframe, desk_id, indicators, smc,
+                candle_manager, confluence_scorer,
+            )
+        else:
+            return self._evaluate_legacy(
+                symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+                candle_manager, confluence_scorer,
+            )
+
+    def _evaluate_weighted(
+        self, symbol, timeframe, desk_id, indicators, smc,
+        candle_manager, confluence_scorer,
+    ):
+        """Weighted continuous MTF confluence scoring [-1, +1]."""
+        mtf = MTFConfluenceScorer(candle_manager=candle_manager)
+        confluence = mtf.score(symbol, candle_manager=candle_manager)
+
+        if not confluence["passes_threshold"]:
+            return None
+
+        direction = confluence["direction"]
+
+        # Gold mid-week confidence boost
+        if desk_id == "DESK4_GOLD":
+            gold_boost = get_gold_confidence_boost()
+            if gold_boost != 1.0:
+                raw = confluence["confluence_score"]
+                boosted = raw * gold_boost
+                confluence["confluence_score"] = round(max(-1.0, min(1.0, boosted)), 4)
+                confluence["total_score"] = round(abs(boosted) * 10, 2)
+                # Re-check threshold after boost
+                from app.services.signal_engine.mtf_confluence import LONG_THRESHOLD, SHORT_THRESHOLD
+                if boosted > LONG_THRESHOLD:
+                    confluence["passes_threshold"] = True
+                    confluence["direction"] = "LONG"
+                    direction = "LONG"
+                elif boosted < SHORT_THRESHOLD:
+                    confluence["passes_threshold"] = True
+                    confluence["direction"] = "SHORT"
+                    direction = "SHORT"
+
+        if not direction:
+            return None
+
+        # Cooldown
+        if self._is_on_cooldown(symbol, desk_id, direction):
+            return None
+
+        # Direction viability from entry TF indicators
+        if not self._direction_viable(direction, indicators, smc):
+            return None
+
+        return self._finalize_signal(
+            symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+            candle_manager,
+        )
+
+    def _evaluate_legacy(
+        self, symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+        candle_manager, confluence_scorer,
+    ):
+        """Legacy binary consensus scoring (0-10 scale, threshold 6.5)."""
         confirm_tf = self._resolve_tf(desk_tfs.get("confirmation", ""))
         bias_tf = self._resolve_tf(desk_tfs.get("bias", ""))
 
@@ -88,16 +153,12 @@ class SignalGenerator:
         confirm_ind = calc.compute(confirm_df, symbol, confirm_tf) if confirm_df is not None else None
         bias_ind = calc.compute(bias_df, symbol, bias_tf) if bias_df is not None else None
 
-        # Evaluate both directions
         for direction in ["LONG", "SHORT"]:
             if not self._direction_viable(direction, indicators, smc):
                 continue
-
-            # Cooldown check
             if self._is_on_cooldown(symbol, desk_id, direction):
                 continue
 
-            # Multi-TF confluence score
             confluence = confluence_scorer.score(
                 direction=direction,
                 entry_indicators=indicators,
@@ -106,7 +167,7 @@ class SignalGenerator:
                 smc_data=smc,
             )
 
-            # Gold mid-week confidence boost (Tue-Thu)
+            # Gold mid-week confidence boost
             if desk_id == "DESK4_GOLD":
                 gold_boost = get_gold_confidence_boost()
                 if gold_boost != 1.0:
@@ -118,59 +179,69 @@ class SignalGenerator:
             if not confluence["passes_threshold"]:
                 continue
 
-            # Determine alert type
-            alert_type = self._classify_signal(direction, indicators, smc, confluence)
-            if alert_type not in VALID_ALERT_TYPES:
-                continue
-
-            # Check desk accepts this alert type
-            desk_alerts = desk.get("alerts", [])
-            if desk_alerts and alert_type not in desk_alerts:
-                continue
-
-            # Spread filter
-            if not self._passes_spread_filter(indicators, desk):
-                continue
-
-            # Compute SL/TP from ATR
-            price = indicators.get("price", 0)
-            atr = indicators.get("atr", 0)
-            sl, tp1, tp2 = self._compute_sl_tp(symbol, desk_id, timeframe, direction, price, atr)
-
-            # R:R check (minimum 1.5)
-            if sl and tp1 and price:
-                sl_dist = abs(price - sl)
-                tp_dist = abs(tp1 - price)
-                if sl_dist > 0 and tp_dist / sl_dist < 1.5:
-                    continue
-
-            # Build payload
-            signal = self._build_payload(
-                symbol=symbol,
-                timeframe=timeframe,
-                desk_id=desk_id,
-                direction=direction,
-                alert_type=alert_type,
-                price=price,
-                sl=sl, tp1=tp1, tp2=tp2,
-                confluence=confluence,
-                indicators=indicators,
-                smc=smc,
+            result = self._finalize_signal(
+                symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+                candle_manager,
             )
-
-            # Record cooldown
-            self._set_cooldown(symbol, desk_id, direction)
-
-            logger.info(
-                f"SIGNAL | {symbol} {direction} {alert_type} | "
-                f"Desk: {desk_id} | Confluence: {confluence['total_score']:.1f}/10 | "
-                f"Entry: {confluence['entry_score']:.1f} Confirm: {confluence['confirm_score']:.1f} "
-                f"Bias: {confluence['bias_score']:.1f} SMC: {confluence['structure_score']:.1f}"
-            )
-
-            return signal
+            if result:
+                return result
 
         return None
+
+    def _finalize_signal(
+        self, symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+        candle_manager,
+    ):
+        """Common logic for both scoring modes: alert type, SL/TP, R:R, payload."""
+        desk = DESKS.get(desk_id, {})
+
+        alert_type = self._classify_signal(direction, indicators, smc, confluence)
+        if alert_type not in VALID_ALERT_TYPES:
+            return None
+
+        desk_alerts = desk.get("alerts", [])
+        if desk_alerts and alert_type not in desk_alerts:
+            return None
+
+        if not self._passes_spread_filter(indicators, desk):
+            return None
+
+        price = indicators.get("price", 0)
+        atr = indicators.get("atr", 0)
+        sl, tp1, tp2 = self._compute_sl_tp(symbol, desk_id, timeframe, direction, price, atr)
+
+        if sl and tp1 and price:
+            sl_dist = abs(price - sl)
+            tp_dist = abs(tp1 - price)
+            if sl_dist > 0 and tp_dist / sl_dist < 1.5:
+                return None
+
+        signal = self._build_payload(
+            symbol=symbol,
+            timeframe=timeframe,
+            desk_id=desk_id,
+            direction=direction,
+            alert_type=alert_type,
+            price=price,
+            sl=sl, tp1=tp1, tp2=tp2,
+            confluence=confluence,
+            indicators=indicators,
+            smc=smc,
+        )
+
+        self._set_cooldown(symbol, desk_id, direction)
+
+        scoring_mode = "WEIGHTED" if MTF_SCORING == "WEIGHTED" else "LEGACY"
+        confluence_val = confluence.get("confluence_score", confluence.get("total_score", 0))
+        logger.info(
+            f"SIGNAL | {symbol} {direction} {alert_type} | "
+            f"Desk: {desk_id} | Score: {confluence_val} ({scoring_mode}) | "
+            f"Entry: {confluence.get('entry_score', 0):.2f} "
+            f"Confirm: {confluence.get('confirm_score', 0):.2f} "
+            f"Bias: {confluence.get('bias_score', 0):.2f}"
+        )
+
+        return signal
 
     # ── Signal Classification ──
 

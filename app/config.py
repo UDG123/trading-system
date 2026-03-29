@@ -38,6 +38,9 @@ FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 # Signal source: TV_ONLY | PYTHON_ONLY | BOTH (shadow/validation mode)
 SIGNAL_SOURCE = os.getenv("SIGNAL_SOURCE", "BOTH")
 
+# MTF scoring mode: WEIGHTED (new continuous ±1) | LEGACY (old 0-10 binary)
+MTF_SCORING = os.getenv("MTF_SCORING", "WEIGHTED")
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM
 # ─────────────────────────────────────────────────────────────
