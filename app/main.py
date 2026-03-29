@@ -182,6 +182,48 @@ async def lifespan(app: FastAPI):
         conn.commit()
         logger.info("Quant stack columns verified (shadow_signals + ml_trade_logs)")
 
+    # Sim positions: 3-tier partial exit columns
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS exit_tier INTEGER",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier1 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier2 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS partial_pnl_tier3 DOUBLE PRECISION",
+            "ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS time_based_exit BOOLEAN DEFAULT FALSE",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("Sim 3-tier exit columns verified (sim_positions)")
+
+    # Regime label column on signals and ml_trade_logs
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS regime_label VARCHAR(20)",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS regime_label VARCHAR(20)",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("Regime label columns verified (signals + ml_trade_logs)")
+
+    # Signal quality, feature engineering, and 3-tier exit columns on ml_trade_logs
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS hurst_exponent DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS mtf_confluence_score DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS vol_regime VARCHAR(10)",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS garman_klass_vol DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS bars_since_regime_change INTEGER",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS exit_tier INTEGER",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS time_based_exit BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier1 DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier2 DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier3 DOUBLE PRECISION",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("ML trade log v7 columns verified (quality, features, exit tiers)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
@@ -498,14 +540,14 @@ async def lifespan(app: FastAPI):
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
 
-        # HMM Regime Detector — daily retraining at 00:05 UTC
+        # HMM Regime Detector — retrain every 4 hours
         async def _train_regime_detector():
             try:
-                from app.services.regime_detector import RegimeDetector
-                detector = RegimeDetector(redis_pool=_redis_pool)
+                from app.services.signal_engine.regime_detector import HMMRegimeDetector
+                detector = HMMRegimeDetector(redis_pool=_redis_pool)
                 db = SessionLocal()
                 try:
-                    result = await detector.train_all(db)
+                    result = await detector.train_all_symbols(db)
                     logger.info(f"HMM regime training: {result}")
                 finally:
                     db.close()
@@ -514,9 +556,9 @@ async def lifespan(app: FastAPI):
 
         _scheduler.add_job(
             _train_regime_detector,
-            trigger=CronTrigger(hour=0, minute=5, timezone="UTC"),
+            trigger=IntervalTrigger(hours=4),
             id="hmm_regime_train",
-            name="HMM Regime Detector (daily 00:05 UTC)",
+            name="HMM Regime Detector (every 4h)",
             replace_existing=True,
         )
 

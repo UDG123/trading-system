@@ -108,10 +108,25 @@ class MLTradeLog(Base):
 
     # ── Quant Stack v7 ──
     hmm_regime = Column(String(20), nullable=True)
+    regime_label = Column(String(20), nullable=True)  # TRENDING_UP / TRENDING_DOWN / RANGING
     meta_probability = Column(Float, nullable=True)
     vol_multiplier = Column(Float, nullable=True)
     har_rv_used = Column(Boolean, nullable=True, default=False)
     orthogonal_weights = Column(JSON, nullable=True)
+
+    # ── Signal Quality + Feature Engineering ──
+    quality_score = Column(Float, nullable=True)          # 0-100 composite
+    mtf_confluence_score = Column(Float, nullable=True)   # -1 to +1 weighted MTF
+    vol_regime = Column(String(10), nullable=True)        # LOW / MEDIUM / HIGH
+    garman_klass_vol = Column(Float, nullable=True)       # rolling 20-bar GK vol
+    bars_since_regime_change = Column(Integer, nullable=True)
+
+    # ── 3-Tier Exit Tracking ──
+    exit_tier = Column(Integer, nullable=True)            # 0/1/2/3
+    time_based_exit = Column(Boolean, nullable=True, default=False)
+    partial_pnl_tier1 = Column(Float, nullable=True)
+    partial_pnl_tier2 = Column(Float, nullable=True)
+    partial_pnl_tier3 = Column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_ml_log_symbol_date", "symbol", "created_at"),

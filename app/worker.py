@@ -57,69 +57,172 @@ def _handle_signal(sig, frame):
 
 async def generate_daily_digest(db_session_factory) -> str:
     """
-    Query ml_trade_logs for today's completed trades across all 6 desks.
-    Returns formatted Telegram HTML message.
+    Query ml_trade_logs + sim_positions for today's metrics.
+    All queries use COALESCE and defensive error handling so the digest
+    never crashes even if v7 columns are missing.
     """
-    from sqlalchemy import func, case
-    from app.models.ml_trade_log import MLTradeLog
+    from sqlalchemy import text as sa_text
 
     db = db_session_factory()
     try:
         today = datetime.now(timezone.utc).date()
+        today_str = today.strftime("%Y-%m-%d")
 
-        # Per-desk stats
-        desk_rows = (
-            db.query(
-                MLTradeLog.desk_id,
-                func.count(MLTradeLog.id).label("total"),
-                func.count(case((MLTradeLog.outcome == "WIN", 1))).label("wins"),
-                func.count(case((MLTradeLog.outcome == "LOSS", 1))).label("losses"),
-                func.coalesce(func.sum(MLTradeLog.pnl_pips), 0).label("pnl_pips"),
-                func.coalesce(func.sum(MLTradeLog.pnl_dollars), 0).label("pnl_dollars"),
-                func.coalesce(func.avg(MLTradeLog.hurst_exponent), 0).label("avg_hurst"),
-            )
-            .filter(func.date(MLTradeLog.created_at) == today)
-            .filter(MLTradeLog.outcome.isnot(None))
-            .group_by(MLTradeLog.desk_id)
-            .all()
-        )
+        # ── Per-desk core stats (defensive — COALESCE for optional columns) ──
+        desk_rows = []
+        try:
+            desk_rows = db.execute(sa_text("""
+                SELECT
+                    desk_id,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') AS wins,
+                    COUNT(*) FILTER (WHERE outcome = 'LOSS') AS losses,
+                    COALESCE(SUM(pnl_pips), 0) AS pnl_pips,
+                    COALESCE(SUM(pnl_dollars), 0) AS pnl_dollars,
+                    COALESCE(AVG(hurst_exponent), 0) AS avg_hurst,
+                    COALESCE(AVG(quality_score), 0) AS avg_quality,
+                    COALESCE(
+                        (SELECT regime_label FROM ml_trade_logs sub
+                         WHERE sub.desk_id = ml_trade_logs.desk_id
+                           AND DATE(sub.created_at) = :today
+                           AND sub.regime_label IS NOT NULL
+                         ORDER BY sub.created_at DESC LIMIT 1),
+                        'N/A'
+                    ) AS last_regime
+                FROM ml_trade_logs
+                WHERE DATE(created_at) = :today AND outcome IS NOT NULL
+                GROUP BY desk_id
+                ORDER BY COALESCE(SUM(pnl_dollars), 0) DESC
+            """), {"today": today_str}).fetchall()
+        except Exception as e:
+            logger.debug(f"Desk stats query failed, trying fallback: {e}")
+            try:
+                desk_rows = db.execute(sa_text("""
+                    SELECT desk_id,
+                           COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE outcome = 'WIN') AS wins,
+                           COUNT(*) FILTER (WHERE outcome = 'LOSS') AS losses,
+                           COALESCE(SUM(pnl_pips), 0) AS pnl_pips,
+                           COALESCE(SUM(pnl_dollars), 0) AS pnl_dollars,
+                           0 AS avg_hurst, 0 AS avg_quality, 'N/A' AS last_regime
+                    FROM ml_trade_logs
+                    WHERE DATE(created_at) = :today AND outcome IS NOT NULL
+                    GROUP BY desk_id
+                    ORDER BY COALESCE(SUM(pnl_dollars), 0) DESC
+                """), {"today": today_str}).fetchall()
+            except Exception:
+                desk_rows = []
 
         # Totals
-        total_trades = sum(r.total for r in desk_rows)
-        total_wins = sum(r.wins for r in desk_rows)
-        total_losses = sum(r.losses for r in desk_rows)
-        total_pnl_pips = sum(float(r.pnl_pips) for r in desk_rows)
-        total_pnl_dollars = sum(float(r.pnl_dollars) for r in desk_rows)
+        total_trades = sum(int(r[1]) for r in desk_rows)
+        total_wins = sum(int(r[2]) for r in desk_rows)
+        total_losses = sum(int(r[3]) for r in desk_rows)
+        total_pnl_pips = sum(float(r[4]) for r in desk_rows)
+        total_pnl_dollars = sum(float(r[5]) for r in desk_rows)
         win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
 
-        # Chop filter stats — how many vetoed today
-        vetoed = (
-            db.query(func.count(MLTradeLog.id))
-            .filter(func.date(MLTradeLog.created_at) == today)
-            .filter(MLTradeLog.block_reason.like("%Hurst%chop%"))
-            .scalar() or 0
-        )
+        # ── Regime distribution today ──
+        regime_dist = {"TRENDING_UP": 0, "TRENDING_DOWN": 0, "RANGING": 0}
+        try:
+            regime_rows = db.execute(sa_text("""
+                SELECT hmm_regime, COUNT(*) AS cnt
+                FROM shadow_signals
+                WHERE DATE(created_at) = :today
+                  AND hmm_regime IS NOT NULL
+                GROUP BY hmm_regime
+            """), {"today": today_str}).fetchall()
+            regime_total = sum(int(r[1]) for r in regime_rows) or 1
+            for r in regime_rows:
+                regime_dist[r[0]] = round(int(r[1]) / regime_total * 100, 1)
+        except Exception:
+            pass
 
-        # Build desk lines
+        trending_pct = regime_dist.get("TRENDING_UP", 0) + regime_dist.get("TRENDING_DOWN", 0)
+        ranging_pct = regime_dist.get("RANGING", 0)
+
+        # ── Exit tier breakdown (from sim_positions) ──
+        tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        time_exits = 0
+        try:
+            tier_rows = db.execute(sa_text("""
+                SELECT
+                    COALESCE(exit_tier, 0) AS tier,
+                    COUNT(*) AS cnt,
+                    COUNT(*) FILTER (WHERE time_based_exit = TRUE) AS timed
+                FROM sim_positions
+                WHERE DATE(closed_at) = :today AND status = 'CLOSED'
+                GROUP BY COALESCE(exit_tier, 0)
+            """), {"today": today_str}).fetchall()
+            for r in tier_rows:
+                tier_counts[int(r[0])] = int(r[1])
+                time_exits += int(r[2])
+        except Exception:
+            pass
+
+        # ── Signal quality pass rate ──
+        emitted = 0
+        total_candidates = 0
+        avg_quality_emitted = 0
+        avg_quality_skipped = 0
+        try:
+            qual_row = db.execute(sa_text("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE approved = TRUE) AS emitted,
+                    COALESCE(AVG(quality_score) FILTER (WHERE approved = TRUE), 0) AS avg_q_emit,
+                    COALESCE(AVG(quality_score) FILTER (WHERE approved = FALSE), 0) AS avg_q_skip
+                FROM ml_trade_logs
+                WHERE DATE(created_at) = :today
+            """), {"today": today_str}).fetchone()
+            if qual_row:
+                total_candidates = int(qual_row[0])
+                emitted = int(qual_row[1])
+                avg_quality_emitted = float(qual_row[2])
+                avg_quality_skipped = float(qual_row[3])
+        except Exception:
+            pass
+
+        pass_rate = (emitted / total_candidates * 100) if total_candidates > 0 else 0
+
+        # ── Market hours filter stats (in-memory counters from signal engine) ──
+        mh_filtered = 0
+        try:
+            from app.services.signal_engine.market_hours_filter import get_filter_stats
+            mh_stats = get_filter_stats()
+            mh_filtered = mh_stats.get("filtered", 0)
+        except Exception:
+            pass
+
+        # ── Build desk lines ──
         desk_lines = []
         desk_emoji = {
             "DESK1_SCALPER": "🟢", "DESK2_INTRADAY": "🟡",
             "DESK3_SWING": "🔵", "DESK4_GOLD": "🔴",
             "DESK5_ALTS": "⚫", "DESK6_EQUITIES": "⚪",
         }
-        for r in sorted(desk_rows, key=lambda x: float(x.pnl_dollars), reverse=True):
-            wr = (r.wins / r.total * 100) if r.total > 0 else 0
-            emoji = desk_emoji.get(r.desk_id, "▪️")
-            pnl_indicator = "✅" if float(r.pnl_dollars) >= 0 else "❌"
+        for r in desk_rows:
+            desk_id = r[0]
+            total = int(r[1])
+            wins = int(r[2])
+            losses = int(r[3])
+            pnl_pips = float(r[4])
+            pnl_dollars = float(r[5])
+            avg_quality = float(r[7])
+            last_regime = r[8]
+            wr = (wins / total * 100) if total > 0 else 0
+            emoji = desk_emoji.get(desk_id, "▪️")
+            pnl_icon = "✅" if pnl_dollars >= 0 else "❌"
+            quality_str = f"Q={avg_quality:.0f}" if avg_quality > 0 else ""
+            regime_str = last_regime if last_regime != "N/A" else ""
             desk_lines.append(
-                f"  {emoji} {r.desk_id}\n"
-                f"     {r.wins}W / {r.losses}L ({wr:.0f}%) | "
-                f"{pnl_indicator} {float(r.pnl_pips):+.1f} pips | "
-                f"${float(r.pnl_dollars):+,.0f} | "
-                f"H̄={float(r.avg_hurst):.2f}"
+                f"  {emoji} {desk_id}\n"
+                f"     {wins}W/{losses}L ({wr:.0f}%) | "
+                f"{pnl_icon} {pnl_pips:+.1f}p ${pnl_dollars:+,.0f}"
+                f"{' | ' + quality_str if quality_str else ''}"
+                f"{' | ' + regime_str if regime_str else ''}"
             )
 
-        # Win rate target indicator
+        # ── Win rate badge ──
         if win_rate >= 69.5:
             target_badge = "🎯 TARGET HIT"
         elif win_rate >= 60:
@@ -129,16 +232,15 @@ async def generate_daily_digest(db_session_factory) -> str:
 
         pnl_emoji = "✅" if total_pnl_dollars >= 0 else "❌"
 
+        # ── Build message ──
         msg = (
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 DAILY PnL REPORT\n"
+            f"📊 Daily Digest — {today.strftime('%b %d %Y')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"\n"
-            f"  📅 {today.strftime('%A, %B %d %Y')}\n"
-            f"  🎯 Win Rate: {win_rate:.1f}% {target_badge}\n"
-            f"  {pnl_emoji} Net P&L: ${total_pnl_dollars:+,.2f} ({total_pnl_pips:+.1f} pips)\n"
-            f"  📈 Trades: {total_trades} ({total_wins}W / {total_losses}L)\n"
-            f"  🌊 Chop Vetoes: {vetoed} signals filtered\n"
+            f"🏢 Firm: {target_badge} | Trades: {total_trades} | "
+            f"{pnl_emoji} ${total_pnl_dollars:+,.2f}\n"
+            f"🎯 Win Rate: {win_rate:.1f}% ({total_wins}W / {total_losses}L)\n"
             f"\n"
             f"┌─ DESK BREAKDOWN\n"
         )
@@ -146,11 +248,45 @@ async def generate_daily_digest(db_session_factory) -> str:
             msg += f"│\n│{line}\n"
         if not desk_lines:
             msg += "│  No completed trades today\n"
+        msg += f"└─────────────────────\n\n"
+
+        # Signal quality section
         msg += (
-            f"└─────────────────────\n"
+            f"📈 Signal Quality: {emitted}/{total_candidates} "
+            f"({pass_rate:.0f}% pass rate)"
+        )
+        if avg_quality_emitted > 0:
+            msg += f"\n   Emitted avg: {avg_quality_emitted:.0f}/100"
+        if avg_quality_skipped > 0:
+            msg += f" | Skipped avg: {avg_quality_skipped:.0f}/100"
+        msg += "\n"
+
+        # Time filter
+        if mh_filtered > 0:
+            msg += f"⏰ Time-filtered: {mh_filtered} signals skipped\n"
+
+        # Regime distribution
+        if trending_pct > 0 or ranging_pct > 0:
+            msg += (
+                f"🔄 Regime: {trending_pct:.0f}% trending, "
+                f"{ranging_pct:.0f}% ranging\n"
+            )
+
+        # Exit tier breakdown
+        t1 = tier_counts.get(1, 0)
+        t2 = tier_counts.get(2, 0)
+        t3 = tier_counts.get(3, 0)
+        t0 = tier_counts.get(0, 0)
+        if t1 + t2 + t3 + time_exits > 0:
+            msg += (
+                f"🎯 Exits: {t1} Tier1, {t2} Tier2, {t3} Tier3"
+                f"{f', {time_exits} timed out' if time_exits > 0 else ''}"
+                f"{f', {t0} SL pre-tier' if t0 > 0 else ''}\n"
+            )
+
+        msg += (
             f"\n"
-            f"  ⚙️ Per-instrument Hurst thresholds (0.45-0.50)\n"
-            f"  🤖 Zero-Key Oracle v6.1.0\n"
+            f"  🤖 OniQuant v7.0\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
 

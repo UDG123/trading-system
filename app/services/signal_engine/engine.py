@@ -19,6 +19,9 @@ from app.services.signal_engine.confluence_scorer import ConfluenceScorer
 from app.services.signal_engine.signal_generator import SignalGenerator
 from app.services.signal_engine.dedup_filter import DedupFilter
 from app.services.signal_engine.rate_limiter import RateLimiter
+from app.services.signal_engine.market_hours_filter import (
+    is_valid_trading_hour, get_filter_stats, reset_filter_stats,
+)
 
 logger = logging.getLogger("TradingSystem.SignalEngine")
 
@@ -80,6 +83,7 @@ class SignalEngine:
         """Main entry point. Runs continuously until cancelled."""
         self._running = True
         logger.info("Signal Engine starting...")
+        reset_filter_stats()
 
         try:
             # Send Telegram notification
@@ -154,6 +158,19 @@ class SignalEngine:
                         await asyncio.sleep(1)
 
                 try:
+                    # Market hours pre-filter — skip symbols with NO open desk
+                    # to avoid wasting a TwelveData credit on a fetch we won't use
+                    from datetime import datetime, timezone as tz
+                    now_utc = datetime.now(tz.utc)
+                    desks = get_desk_for_symbol(symbol)
+                    active_desks = [
+                        d for d in desks
+                        if is_valid_trading_hour(symbol, d, now_utc)
+                    ]
+                    if not active_desks:
+                        await asyncio.sleep(0.1)
+                        continue
+
                     # Fetch latest candles
                     new_bars = await self.candle_manager.fetch_latest(symbol, timeframe)
                     if not new_bars:
@@ -174,9 +191,8 @@ class SignalEngine:
                     # SMC analysis
                     smc = self.smc_analyzer.analyze(df, symbol)
 
-                    # Evaluate signals for all desks this symbol belongs to
-                    desks = get_desk_for_symbol(symbol)
-                    for desk_id in desks:
+                    # Evaluate signals only for desks within market hours
+                    for desk_id in active_desks:
                         signal = self.signal_generator.evaluate(
                             symbol=symbol,
                             timeframe=timeframe,
@@ -240,12 +256,18 @@ class SignalEngine:
 
     async def _notify_stop(self) -> None:
         """Send Telegram notification on engine stop."""
+        stats = get_filter_stats()
+        logger.info(
+            f"Market hours filter stats: {stats['filtered']} filtered, "
+            f"{stats['passed']} passed ({stats['filter_rate']:.1%} filter rate)"
+        )
         try:
             from app.services.telegram_bot import TelegramBot
             tg = TelegramBot()
             await tg._send_to_system(
                 "🔴 SIGNAL ENGINE OFFLINE\n"
                 f"Signals emitted this session: {self._signal_count}\n"
+                f"Market hours filtered: {stats['filtered']}/{stats['total']}\n"
                 f"Credits remaining: {self.rate_limiter.daily_remaining}"
             )
         except Exception:

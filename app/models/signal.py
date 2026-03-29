@@ -61,6 +61,9 @@ class Signal(Base):
     # ── Pending Memory Engine ──
     ttl_expiry = Column(DateTime(timezone=True), nullable=True)  # auto-cancel if not filled by this time
 
+    # ── HMM Regime ──
+    regime_label = Column(String(20), nullable=True)  # TRENDING_UP / TRENDING_DOWN / RANGING
+
     # ── ML scoring (Phase 2) ──
     ml_score = Column(Float, nullable=True)
     ml_method = Column(String(20), nullable=True)  # "model" or "rule_based"

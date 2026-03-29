@@ -122,9 +122,14 @@ class SimPosition(Base):
     max_favorable_pips = Column(Float)      # MFE
     max_adverse_pips = Column(Float)        # MAE
 
-    # ── Partial close ──
+    # ── Partial close (3-tier system) ──
     partial_close_pct = Column(Float)
     partial_pnl = Column(Float)
+    exit_tier = Column(Integer)                 # 1, 2, or 3 — which tier triggered final close
+    partial_pnl_tier1 = Column(Float)           # PnL from 33% close at 1R
+    partial_pnl_tier2 = Column(Float)           # PnL from 33% close at 3R
+    partial_pnl_tier3 = Column(Float)           # PnL from 34% trailing close
+    time_based_exit = Column(Boolean, default=False)  # True if zombie trade time-exit
 
     # ── Exit ──
     exit_price = Column(Float)

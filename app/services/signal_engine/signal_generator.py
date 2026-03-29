@@ -11,12 +11,17 @@ from typing import Dict, List, Optional
 
 from app.config import (
     DESKS, VALID_ALERT_TYPES, SESSION_WINDOWS,
-    get_desk_for_symbol, get_atr_settings,
+    get_desk_for_symbol, get_atr_settings, MTF_SCORING,
 )
 from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.smc_analyzer import SMCAnalyzer
 from app.services.signal_engine.confluence_scorer import ConfluenceScorer, CONFLUENCE_THRESHOLD
+from app.services.signal_engine.mtf_confluence import MTFConfluenceScorer
+from app.services.signal_engine.quality_scorer import SignalQualityScorer
 from app.services.signal_engine.candle_manager import CandleManager
+from app.services.signal_engine.market_hours_filter import (
+    is_valid_trading_hour, get_gold_confidence_boost,
+)
 
 logger = logging.getLogger("TradingSystem.SignalEngine.Generator")
 
@@ -57,12 +62,8 @@ class SignalGenerator:
         if not indicators:
             return None
 
-        # Session check
-        if not self._is_in_session(desk_id):
-            return None
-
-        # Weekend filter (no signals Fri 21:00 UTC - Sun 22:00 UTC, except crypto)
-        if self._is_weekend_blocked(symbol):
+        # Market hours filter (replaces old session + weekend checks)
+        if not is_valid_trading_hour(symbol, desk_id):
             return None
 
         # ADX floor
@@ -78,7 +79,71 @@ class SignalGenerator:
             # Only generate signals from entry timeframe
             return None
 
-        # Get indicators for confirmation and bias timeframes
+        # ── Scoring: WEIGHTED (new continuous) vs LEGACY (old binary) ──
+        if MTF_SCORING == "WEIGHTED":
+            return self._evaluate_weighted(
+                symbol, timeframe, desk_id, indicators, smc,
+                candle_manager, confluence_scorer,
+            )
+        else:
+            return self._evaluate_legacy(
+                symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+                candle_manager, confluence_scorer,
+            )
+
+    def _evaluate_weighted(
+        self, symbol, timeframe, desk_id, indicators, smc,
+        candle_manager, confluence_scorer,
+    ):
+        """Weighted continuous MTF confluence scoring [-1, +1]."""
+        mtf = MTFConfluenceScorer(candle_manager=candle_manager)
+        confluence = mtf.score(symbol, candle_manager=candle_manager)
+
+        if not confluence["passes_threshold"]:
+            return None
+
+        direction = confluence["direction"]
+
+        # Gold mid-week confidence boost
+        if desk_id == "DESK4_GOLD":
+            gold_boost = get_gold_confidence_boost()
+            if gold_boost != 1.0:
+                raw = confluence["confluence_score"]
+                boosted = raw * gold_boost
+                confluence["confluence_score"] = round(max(-1.0, min(1.0, boosted)), 4)
+                confluence["total_score"] = round(abs(boosted) * 10, 2)
+                # Re-check threshold after boost
+                from app.services.signal_engine.mtf_confluence import LONG_THRESHOLD, SHORT_THRESHOLD
+                if boosted > LONG_THRESHOLD:
+                    confluence["passes_threshold"] = True
+                    confluence["direction"] = "LONG"
+                    direction = "LONG"
+                elif boosted < SHORT_THRESHOLD:
+                    confluence["passes_threshold"] = True
+                    confluence["direction"] = "SHORT"
+                    direction = "SHORT"
+
+        if not direction:
+            return None
+
+        # Cooldown
+        if self._is_on_cooldown(symbol, desk_id, direction):
+            return None
+
+        # Direction viability from entry TF indicators
+        if not self._direction_viable(direction, indicators, smc):
+            return None
+
+        return self._finalize_signal(
+            symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+            candle_manager,
+        )
+
+    def _evaluate_legacy(
+        self, symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+        candle_manager, confluence_scorer,
+    ):
+        """Legacy binary consensus scoring (0-10 scale, threshold 6.5)."""
         confirm_tf = self._resolve_tf(desk_tfs.get("confirmation", ""))
         bias_tf = self._resolve_tf(desk_tfs.get("bias", ""))
 
@@ -89,16 +154,12 @@ class SignalGenerator:
         confirm_ind = calc.compute(confirm_df, symbol, confirm_tf) if confirm_df is not None else None
         bias_ind = calc.compute(bias_df, symbol, bias_tf) if bias_df is not None else None
 
-        # Evaluate both directions
         for direction in ["LONG", "SHORT"]:
             if not self._direction_viable(direction, indicators, smc):
                 continue
-
-            # Cooldown check
             if self._is_on_cooldown(symbol, desk_id, direction):
                 continue
 
-            # Multi-TF confluence score
             confluence = confluence_scorer.score(
                 direction=direction,
                 entry_indicators=indicators,
@@ -107,62 +168,169 @@ class SignalGenerator:
                 smc_data=smc,
             )
 
+            # Gold mid-week confidence boost
+            if desk_id == "DESK4_GOLD":
+                gold_boost = get_gold_confidence_boost()
+                if gold_boost != 1.0:
+                    confluence["total_score"] = round(
+                        confluence["total_score"] * gold_boost, 2
+                    )
+                    confluence["passes_threshold"] = confluence["total_score"] >= CONFLUENCE_THRESHOLD
+
             if not confluence["passes_threshold"]:
                 continue
 
-            # Determine alert type
-            alert_type = self._classify_signal(direction, indicators, smc, confluence)
-            if alert_type not in VALID_ALERT_TYPES:
-                continue
-
-            # Check desk accepts this alert type
-            desk_alerts = desk.get("alerts", [])
-            if desk_alerts and alert_type not in desk_alerts:
-                continue
-
-            # Spread filter
-            if not self._passes_spread_filter(indicators, desk):
-                continue
-
-            # Compute SL/TP from ATR
-            price = indicators.get("price", 0)
-            atr = indicators.get("atr", 0)
-            sl, tp1, tp2 = self._compute_sl_tp(symbol, desk_id, timeframe, direction, price, atr)
-
-            # R:R check (minimum 1.5)
-            if sl and tp1 and price:
-                sl_dist = abs(price - sl)
-                tp_dist = abs(tp1 - price)
-                if sl_dist > 0 and tp_dist / sl_dist < 1.5:
-                    continue
-
-            # Build payload
-            signal = self._build_payload(
-                symbol=symbol,
-                timeframe=timeframe,
-                desk_id=desk_id,
-                direction=direction,
-                alert_type=alert_type,
-                price=price,
-                sl=sl, tp1=tp1, tp2=tp2,
-                confluence=confluence,
-                indicators=indicators,
-                smc=smc,
+            result = self._finalize_signal(
+                symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+                candle_manager,
             )
-
-            # Record cooldown
-            self._set_cooldown(symbol, desk_id, direction)
-
-            logger.info(
-                f"SIGNAL | {symbol} {direction} {alert_type} | "
-                f"Desk: {desk_id} | Confluence: {confluence['total_score']:.1f}/10 | "
-                f"Entry: {confluence['entry_score']:.1f} Confirm: {confluence['confirm_score']:.1f} "
-                f"Bias: {confluence['bias_score']:.1f} SMC: {confluence['structure_score']:.1f}"
-            )
-
-            return signal
+            if result:
+                return result
 
         return None
+
+    def _finalize_signal(
+        self, symbol, timeframe, desk_id, direction, indicators, smc, confluence,
+        candle_manager,
+    ):
+        """Common logic for both scoring modes: alert type, SL/TP, R:R, payload."""
+        desk = DESKS.get(desk_id, {})
+
+        # ── Regime-aware filtering ──
+        regime_info = self._get_regime(symbol, candle_manager)
+        if regime_info and regime_info.get("regime") != "UNKNOWN":
+            regime = regime_info["regime"]
+            favored = regime_info.get("favor_direction")
+
+            # In trending regimes, skip signals against the trend
+            if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
+                return None
+
+            # Store regime in confluence for downstream logging
+            confluence["regime"] = regime
+            confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+
+        alert_type = self._classify_signal(direction, indicators, smc, confluence)
+        if alert_type not in VALID_ALERT_TYPES:
+            return None
+
+        desk_alerts = desk.get("alerts", [])
+        if desk_alerts and alert_type not in desk_alerts:
+            return None
+
+        if not self._passes_spread_filter(indicators, desk):
+            return None
+
+        price = indicators.get("price", 0)
+        atr = indicators.get("atr", 0)
+
+        # Use regime-specific SL ATR multiplier if in RANGING
+        sl_atr_override = None
+        if regime_info and regime_info.get("sl_atr_mult"):
+            sl_atr_override = regime_info["sl_atr_mult"]
+
+        sl, tp1, tp2 = self._compute_sl_tp(
+            symbol, desk_id, timeframe, direction, price, atr,
+            sl_mult_override=sl_atr_override,
+        )
+
+        if sl and tp1 and price:
+            sl_dist = abs(price - sl)
+            tp_dist = abs(tp1 - price)
+            if sl_dist > 0 and tp_dist / sl_dist < 1.5:
+                return None
+
+        # ── Quality Score Gate ──
+        quality_scorer = SignalQualityScorer()
+
+        # Try to get CatBoost probability for quality scoring
+        catboost_proba = None
+        try:
+            from app.services.meta_labeler import MetaLabeler
+            _meta = MetaLabeler()
+            if _meta._model is not None:
+                from datetime import datetime as _dt, timezone as _tz
+                _now = _dt.now(_tz.utc)
+                meta_features = {
+                    "consensus_score": confluence.get("total_score", 0),
+                    "ml_score": 0.5,
+                    "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
+                    "rsi": indicators.get("rsi", 50),
+                    "adx": indicators.get("adx", 20),
+                    "atr_pct": indicators.get("atr_pct", 0),
+                    "rvol": indicators.get("rvol", 1),
+                    "hour_utc": _now.hour,
+                    "day_of_week": _now.weekday(),
+                    "vix_level": 20,
+                }
+                meta_result = _meta.predict(meta_features)
+                catboost_proba = meta_result.get("meta_probability")
+        except Exception:
+            pass
+
+        # Add candle body ratio to indicators for quality scoring
+        if candle_manager:
+            df = candle_manager.get_dataframe(symbol, timeframe)
+            if df is not None and len(df) >= 1:
+                last = df.iloc[-1]
+                bar_range = float(last["high"]) - float(last["low"])
+                if bar_range > 0:
+                    indicators["candle_body_ratio"] = abs(
+                        float(last["close"]) - float(last["open"])
+                    ) / bar_range
+
+        quality = quality_scorer.score(
+            confluence=confluence,
+            indicators=indicators,
+            smc=smc,
+            alert_type=alert_type,
+            catboost_proba=catboost_proba,
+        )
+
+        if not quality["emit"]:
+            logger.info(
+                f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
+                f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
+                f"(threshold: {quality['threshold']}) | "
+                f"Breakdown: {quality['breakdown']}"
+            )
+            return None
+
+        signal = self._build_payload(
+            symbol=symbol,
+            timeframe=timeframe,
+            desk_id=desk_id,
+            direction=direction,
+            alert_type=alert_type,
+            price=price,
+            sl=sl, tp1=tp1, tp2=tp2,
+            confluence=confluence,
+            indicators=indicators,
+            smc=smc,
+        )
+
+        # Attach quality score and size multiplier to payload
+        signal["quality_score"] = quality["quality_score"]
+        signal["quality_tier"] = quality["tier"]
+        signal["quality_size_mult"] = quality["size_multiplier"]
+        signal["quality_breakdown"] = quality["breakdown"]
+
+        self._set_cooldown(symbol, desk_id, direction)
+
+        scoring_mode = "WEIGHTED" if MTF_SCORING == "WEIGHTED" else "LEGACY"
+        logger.info(
+            f"SIGNAL | {symbol} {direction} {alert_type} | "
+            f"Desk: {desk_id} | Quality: {quality['quality_score']}/100 ({quality['tier']}) | "
+            f"Size: {quality['size_multiplier']}x | Mode: {scoring_mode} | "
+            f"Breakdown: MTF={quality['breakdown'].get('mtf_confluence', 0):.0f} "
+            f"Regime={quality['breakdown'].get('regime_suitability', 0):.0f} "
+            f"S/R={quality['breakdown'].get('sr_proximity', 0):.0f} "
+            f"Candle={quality['breakdown'].get('candle_quality', 0):.0f} "
+            f"ML={quality['breakdown'].get('catboost', 0):.0f} "
+            f"Vol={quality['breakdown'].get('volume', 0):.0f}"
+        )
+
+        return signal
 
     # ── Signal Classification ──
 
@@ -219,13 +387,14 @@ class SignalGenerator:
     def _compute_sl_tp(
         self, symbol: str, desk_id: str, timeframe: str,
         direction: str, price: float, atr: float,
+        sl_mult_override: float = None,
     ) -> tuple:
         """Compute SL and TP levels from ATR settings."""
         if price <= 0 or atr <= 0:
             return None, None, None
 
         cfg = get_atr_settings(desk_id, symbol, timeframe)
-        sl_mult = cfg.get("sl_mult", 2.0)
+        sl_mult = sl_mult_override or cfg.get("sl_mult", 2.0)
         tp1_mult = cfg.get("tp1_mult", 4.0)
         tp2_mult = cfg.get("tp2_mult", 6.0)
 
@@ -383,3 +552,22 @@ class SignalGenerator:
             return True
         # Spread data would come from enrichment; not available at signal generation
         return True
+
+    @staticmethod
+    def _get_regime(symbol: str, candle_manager) -> Optional[Dict]:
+        """Get HMM regime for a symbol. Returns None if unavailable."""
+        try:
+            from app.services.signal_engine.regime_detector import HMMRegimeDetector
+            detector = HMMRegimeDetector()
+            # Use candle_manager's DB factory for sync access
+            if hasattr(candle_manager, '_db_factory') and candle_manager._db_factory:
+                db = candle_manager._db_factory()
+                try:
+                    result = detector.get_regime_sync(symbol, db)
+                    if result.get("regime") != "UNKNOWN":
+                        return result
+                finally:
+                    db.close()
+        except Exception:
+            pass
+        return None
