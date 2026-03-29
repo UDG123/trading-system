@@ -272,9 +272,66 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.debug(f"Equity snapshot error: {e}")
 
+        def _filter_open_markets(symbols):
+            """Filter out symbols whose market is currently closed."""
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            _EQUITY = {"AAPL", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NVDA", "TSLA", "NFLX"}
+            _INDEX = {"DJI", "NAS100", "NDX", "SPX", "US30", "US100", "US500"}
+            _CRYPTO = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "LINKUSD"}
+            _COMMODITY = {"XAUUSD", "XAGUSD", "WTIUSD", "XCUUSD"}
+
+            et = ZoneInfo("America/New_York")
+            now = datetime.now(et)
+            weekday = now.weekday()  # Mon=0, Sun=6
+            hour = now.hour
+            minute = now.minute
+            time_decimal = hour + minute / 60.0
+
+            result = []
+            for sym in symbols:
+                s = sym.upper()
+
+                # Crypto: always open
+                if s in _CRYPTO:
+                    result.append(sym)
+                    continue
+
+                # Equity/Index: Mon-Fri 9:30-16:00 ET
+                if s in _EQUITY or s in _INDEX:
+                    if 0 <= weekday <= 4 and 9.5 <= time_decimal < 16.0:
+                        result.append(sym)
+                    continue
+
+                # Commodity: Sun 18:00 ET through Fri 17:00 ET
+                if s in _COMMODITY:
+                    if weekday == 6 and time_decimal >= 18.0:
+                        result.append(sym)
+                    elif weekday == 4 and time_decimal >= 17.0:
+                        pass  # closed
+                    elif weekday == 5:
+                        pass  # Saturday closed
+                    elif 0 <= weekday <= 4:
+                        result.append(sym)
+                    continue
+
+                # FX (everything else): Sun 17:00 ET through Fri 17:00 ET
+                if weekday == 6 and time_decimal >= 17.0:
+                    result.append(sym)
+                elif weekday == 4 and time_decimal >= 17.0:
+                    pass  # closed
+                elif weekday == 5:
+                    pass  # Saturday closed
+                elif 0 <= weekday <= 4:
+                    result.append(sym)
+
+            return result
+
         async def _run_sim_exit_checker():
             """Check sim positions for exit conditions.
             Uses batch TwelveData call (1 API credit) instead of per-symbol calls.
+            Skips symbols whose market is currently closed to save credits.
             """
             try:
                 from app.services.virtual_broker import VirtualBroker
@@ -290,15 +347,19 @@ async def lifespan(app: FastAPI):
                         .all()
                     )
                     if open_syms:
-                        ps = PriceService()
                         symbols = [sym for (sym,) in open_syms]
-                        prices = await ps.get_prices_batch(symbols)
-                        await ps.close()
-                        if prices:
-                            closed = await broker.check_exits(db, prices)
-                            db.commit()
-                            if closed:
-                                logger.debug(f"Sim exit checker: {len(closed)} positions closed")
+                        symbols = _filter_open_markets(symbols)
+                        if not symbols:
+                            logger.debug("Sim exit checker: skipped — all markets closed")
+                        else:
+                            ps = PriceService()
+                            prices = await ps.get_prices_batch(symbols)
+                            await ps.close()
+                            if prices:
+                                closed = await broker.check_exits(db, prices)
+                                db.commit()
+                                if closed:
+                                    logger.debug(f"Sim exit checker: {len(closed)} positions closed")
                 finally:
                     db.close()
             except Exception as e:
