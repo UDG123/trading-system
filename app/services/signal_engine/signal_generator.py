@@ -17,6 +17,7 @@ from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.smc_analyzer import SMCAnalyzer
 from app.services.signal_engine.confluence_scorer import ConfluenceScorer, CONFLUENCE_THRESHOLD
 from app.services.signal_engine.mtf_confluence import MTFConfluenceScorer
+from app.services.signal_engine.quality_scorer import SignalQualityScorer
 from app.services.signal_engine.candle_manager import CandleManager
 from app.services.signal_engine.market_hours_filter import (
     is_valid_trading_hour, get_gold_confidence_boost,
@@ -239,6 +240,62 @@ class SignalGenerator:
             if sl_dist > 0 and tp_dist / sl_dist < 1.5:
                 return None
 
+        # ── Quality Score Gate ──
+        quality_scorer = SignalQualityScorer()
+
+        # Try to get CatBoost probability for quality scoring
+        catboost_proba = None
+        try:
+            from app.services.meta_labeler import MetaLabeler
+            _meta = MetaLabeler()
+            if _meta._model is not None:
+                from datetime import datetime as _dt, timezone as _tz
+                _now = _dt.now(_tz.utc)
+                meta_features = {
+                    "consensus_score": confluence.get("total_score", 0),
+                    "ml_score": 0.5,
+                    "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
+                    "rsi": indicators.get("rsi", 50),
+                    "adx": indicators.get("adx", 20),
+                    "atr_pct": indicators.get("atr_pct", 0),
+                    "rvol": indicators.get("rvol", 1),
+                    "hour_utc": _now.hour,
+                    "day_of_week": _now.weekday(),
+                    "vix_level": 20,
+                }
+                meta_result = _meta.predict(meta_features)
+                catboost_proba = meta_result.get("meta_probability")
+        except Exception:
+            pass
+
+        # Add candle body ratio to indicators for quality scoring
+        if candle_manager:
+            df = candle_manager.get_dataframe(symbol, timeframe)
+            if df is not None and len(df) >= 1:
+                last = df.iloc[-1]
+                bar_range = float(last["high"]) - float(last["low"])
+                if bar_range > 0:
+                    indicators["candle_body_ratio"] = abs(
+                        float(last["close"]) - float(last["open"])
+                    ) / bar_range
+
+        quality = quality_scorer.score(
+            confluence=confluence,
+            indicators=indicators,
+            smc=smc,
+            alert_type=alert_type,
+            catboost_proba=catboost_proba,
+        )
+
+        if not quality["emit"]:
+            logger.info(
+                f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
+                f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
+                f"(threshold: {quality['threshold']}) | "
+                f"Breakdown: {quality['breakdown']}"
+            )
+            return None
+
         signal = self._build_payload(
             symbol=symbol,
             timeframe=timeframe,
@@ -252,16 +309,25 @@ class SignalGenerator:
             smc=smc,
         )
 
+        # Attach quality score and size multiplier to payload
+        signal["quality_score"] = quality["quality_score"]
+        signal["quality_tier"] = quality["tier"]
+        signal["quality_size_mult"] = quality["size_multiplier"]
+        signal["quality_breakdown"] = quality["breakdown"]
+
         self._set_cooldown(symbol, desk_id, direction)
 
         scoring_mode = "WEIGHTED" if MTF_SCORING == "WEIGHTED" else "LEGACY"
-        confluence_val = confluence.get("confluence_score", confluence.get("total_score", 0))
         logger.info(
             f"SIGNAL | {symbol} {direction} {alert_type} | "
-            f"Desk: {desk_id} | Score: {confluence_val} ({scoring_mode}) | "
-            f"Entry: {confluence.get('entry_score', 0):.2f} "
-            f"Confirm: {confluence.get('confirm_score', 0):.2f} "
-            f"Bias: {confluence.get('bias_score', 0):.2f}"
+            f"Desk: {desk_id} | Quality: {quality['quality_score']}/100 ({quality['tier']}) | "
+            f"Size: {quality['size_multiplier']}x | Mode: {scoring_mode} | "
+            f"Breakdown: MTF={quality['breakdown'].get('mtf_confluence', 0):.0f} "
+            f"Regime={quality['breakdown'].get('regime_suitability', 0):.0f} "
+            f"S/R={quality['breakdown'].get('sr_proximity', 0):.0f} "
+            f"Candle={quality['breakdown'].get('candle_quality', 0):.0f} "
+            f"ML={quality['breakdown'].get('catboost', 0):.0f} "
+            f"Vol={quality['breakdown'].get('volume', 0):.0f}"
         )
 
         return signal
