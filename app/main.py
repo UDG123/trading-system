@@ -205,6 +205,25 @@ async def lifespan(app: FastAPI):
         conn.commit()
         logger.info("Regime label columns verified (signals + ml_trade_logs)")
 
+    # Signal quality, feature engineering, and 3-tier exit columns on ml_trade_logs
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS hurst_exponent DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS mtf_confluence_score DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS vol_regime VARCHAR(10)",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS garman_klass_vol DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS bars_since_regime_change INTEGER",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS exit_tier INTEGER",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS time_based_exit BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier1 DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier2 DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS partial_pnl_tier3 DOUBLE PRECISION",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("ML trade log v7 columns verified (quality, features, exit tiers)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
