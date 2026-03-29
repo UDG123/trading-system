@@ -17,6 +17,9 @@ from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.smc_analyzer import SMCAnalyzer
 from app.services.signal_engine.confluence_scorer import ConfluenceScorer, CONFLUENCE_THRESHOLD
 from app.services.signal_engine.candle_manager import CandleManager
+from app.services.signal_engine.market_hours_filter import (
+    is_valid_trading_hour, get_gold_confidence_boost,
+)
 
 logger = logging.getLogger("TradingSystem.SignalEngine.Generator")
 
@@ -57,12 +60,8 @@ class SignalGenerator:
         if not indicators:
             return None
 
-        # Session check
-        if not self._is_in_session(desk_id):
-            return None
-
-        # Weekend filter (no signals Fri 21:00 UTC - Sun 22:00 UTC, except crypto)
-        if self._is_weekend_blocked(symbol):
+        # Market hours filter (replaces old session + weekend checks)
+        if not is_valid_trading_hour(symbol, desk_id):
             return None
 
         # ADX floor
@@ -106,6 +105,15 @@ class SignalGenerator:
                 bias_indicators=bias_ind,
                 smc_data=smc,
             )
+
+            # Gold mid-week confidence boost (Tue-Thu)
+            if desk_id == "DESK4_GOLD":
+                gold_boost = get_gold_confidence_boost()
+                if gold_boost != 1.0:
+                    confluence["total_score"] = round(
+                        confluence["total_score"] * gold_boost, 2
+                    )
+                    confluence["passes_threshold"] = confluence["total_score"] >= CONFLUENCE_THRESHOLD
 
             if not confluence["passes_threshold"]:
                 continue
