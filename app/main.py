@@ -195,6 +195,16 @@ async def lifespan(app: FastAPI):
         conn.commit()
         logger.info("Sim 3-tier exit columns verified (sim_positions)")
 
+    # Regime label column on signals and ml_trade_logs
+    with engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS regime_label VARCHAR(20)",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS regime_label VARCHAR(20)",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("Regime label columns verified (signals + ml_trade_logs)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
@@ -511,14 +521,14 @@ async def lifespan(app: FastAPI):
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
 
-        # HMM Regime Detector — daily retraining at 00:05 UTC
+        # HMM Regime Detector — retrain every 4 hours
         async def _train_regime_detector():
             try:
-                from app.services.regime_detector import RegimeDetector
-                detector = RegimeDetector(redis_pool=_redis_pool)
+                from app.services.signal_engine.regime_detector import HMMRegimeDetector
+                detector = HMMRegimeDetector(redis_pool=_redis_pool)
                 db = SessionLocal()
                 try:
-                    result = await detector.train_all(db)
+                    result = await detector.train_all_symbols(db)
                     logger.info(f"HMM regime training: {result}")
                 finally:
                     db.close()
@@ -527,9 +537,9 @@ async def lifespan(app: FastAPI):
 
         _scheduler.add_job(
             _train_regime_detector,
-            trigger=CronTrigger(hour=0, minute=5, timezone="UTC"),
+            trigger=IntervalTrigger(hours=4),
             id="hmm_regime_train",
-            name="HMM Regime Detector (daily 00:05 UTC)",
+            name="HMM Regime Detector (every 4h)",
             replace_existing=True,
         )
 

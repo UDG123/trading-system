@@ -108,6 +108,7 @@ class MLTradeLog(Base):
 
     # ── Quant Stack v7 ──
     hmm_regime = Column(String(20), nullable=True)
+    regime_label = Column(String(20), nullable=True)  # TRENDING_UP / TRENDING_DOWN / RANGING
     meta_probability = Column(Float, nullable=True)
     vol_multiplier = Column(Float, nullable=True)
     har_rv_used = Column(Boolean, nullable=True, default=False)

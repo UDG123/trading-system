@@ -195,6 +195,20 @@ class SignalGenerator:
         """Common logic for both scoring modes: alert type, SL/TP, R:R, payload."""
         desk = DESKS.get(desk_id, {})
 
+        # ── Regime-aware filtering ──
+        regime_info = self._get_regime(symbol, candle_manager)
+        if regime_info and regime_info.get("regime") != "UNKNOWN":
+            regime = regime_info["regime"]
+            favored = regime_info.get("favor_direction")
+
+            # In trending regimes, skip signals against the trend
+            if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
+                return None
+
+            # Store regime in confluence for downstream logging
+            confluence["regime"] = regime
+            confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+
         alert_type = self._classify_signal(direction, indicators, smc, confluence)
         if alert_type not in VALID_ALERT_TYPES:
             return None
@@ -208,7 +222,16 @@ class SignalGenerator:
 
         price = indicators.get("price", 0)
         atr = indicators.get("atr", 0)
-        sl, tp1, tp2 = self._compute_sl_tp(symbol, desk_id, timeframe, direction, price, atr)
+
+        # Use regime-specific SL ATR multiplier if in RANGING
+        sl_atr_override = None
+        if regime_info and regime_info.get("sl_atr_mult"):
+            sl_atr_override = regime_info["sl_atr_mult"]
+
+        sl, tp1, tp2 = self._compute_sl_tp(
+            symbol, desk_id, timeframe, direction, price, atr,
+            sl_mult_override=sl_atr_override,
+        )
 
         if sl and tp1 and price:
             sl_dist = abs(price - sl)
@@ -298,13 +321,14 @@ class SignalGenerator:
     def _compute_sl_tp(
         self, symbol: str, desk_id: str, timeframe: str,
         direction: str, price: float, atr: float,
+        sl_mult_override: float = None,
     ) -> tuple:
         """Compute SL and TP levels from ATR settings."""
         if price <= 0 or atr <= 0:
             return None, None, None
 
         cfg = get_atr_settings(desk_id, symbol, timeframe)
-        sl_mult = cfg.get("sl_mult", 2.0)
+        sl_mult = sl_mult_override or cfg.get("sl_mult", 2.0)
         tp1_mult = cfg.get("tp1_mult", 4.0)
         tp2_mult = cfg.get("tp2_mult", 6.0)
 
@@ -462,3 +486,22 @@ class SignalGenerator:
             return True
         # Spread data would come from enrichment; not available at signal generation
         return True
+
+    @staticmethod
+    def _get_regime(symbol: str, candle_manager) -> Optional[Dict]:
+        """Get HMM regime for a symbol. Returns None if unavailable."""
+        try:
+            from app.services.signal_engine.regime_detector import HMMRegimeDetector
+            detector = HMMRegimeDetector()
+            # Use candle_manager's DB factory for sync access
+            if hasattr(candle_manager, '_db_factory') and candle_manager._db_factory:
+                db = candle_manager._db_factory()
+                try:
+                    result = detector.get_regime_sync(symbol, db)
+                    if result.get("regime") != "UNKNOWN":
+                        return result
+                finally:
+                    db.close()
+        except Exception:
+            pass
+        return None

@@ -237,33 +237,39 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             signal.status = "ENRICHED"
             db.commit()
 
-            # ── 2a-q. HMM Regime Detection (optional — replaces binary Hurst gate) ──
+            # ── 2a-q. HMM Regime Detection (3-state: TRENDING_UP/DOWN, RANGING) ──
             regime_info = None
             try:
-                from app.services.regime_detector import RegimeDetector
-                _regime = RegimeDetector()
-                regime_info = _regime.get_regime_for_symbol(signal.symbol_normalized, db)
+                from app.services.signal_engine.regime_detector import HMMRegimeDetector
+                _regime = HMMRegimeDetector()
+                regime_info = _regime.get_regime_sync(signal.symbol_normalized, db)
                 if regime_info and regime_info.get("regime") != "UNKNOWN":
                     enrichment["hmm_regime"] = regime_info["regime"]
                     enrichment["hmm_confidence"] = regime_info.get("confidence", 0)
+                    enrichment["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+                    enrichment["regime_sl_atr_mult"] = regime_info.get("sl_atr_mult", 2.5)
+                    # Store regime_label on the signal record
+                    signal.desk_id = signal.desk_id  # ensure set
                     logger.info(
                         f"REGIME | {desk_id} | {signal.symbol_normalized} | "
-                        f"{regime_info['regime']} (conf={regime_info.get('confidence', 0):.2f})"
+                        f"{regime_info['regime']} (conf={regime_info.get('confidence', 0):.2f}) | "
+                        f"size={regime_info.get('size_multiplier', 1.0)}x"
                     )
-                    # Mean-reverting regime: suppress trend signals on swing/intraday
-                    if (regime_info["regime"] == "MEAN_REVERTING"
+                    # RANGING regime: suppress trend signals on momentum desks
+                    if (regime_info["regime"] == "RANGING"
                             and regime_info.get("confidence", 0) > 0.6
                             and desk_id in ("DESK2_INTRADAY", "DESK3_SWING")):
                         signal.status = "SKIPPED_REGIME"
                         db.commit()
                         results[desk_id] = {
                             "decision": "SKIP", "approved": False,
-                            "rejection_reason": f"HMM regime: MEAN_REVERTING (conf={regime_info['confidence']:.2f})",
+                            "rejection_reason": f"HMM regime: RANGING (conf={regime_info['confidence']:.2f})",
                         }
                         continue
-                    # Volatile regime: reduce sizing
-                    if regime_info["regime"] == "VOLATILE":
-                        vix_size_modifier *= 0.7
+                    # Apply regime size multiplier to vix_size_modifier
+                    regime_size = regime_info.get("size_multiplier", 1.0)
+                    if regime_size != 1.0:
+                        vix_size_modifier *= regime_size
             except Exception as e:
                 logger.debug(f"Regime detection skipped: {e}")
 
