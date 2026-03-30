@@ -66,31 +66,65 @@ class SignalGenerator:
         if not is_valid_trading_hour(symbol, desk_id):
             return None
 
-        # ADX floor
-        if indicators.get("adx", 0) < MIN_ADX:
-            return None
-
         desk = DESKS.get(desk_id, {})
         desk_tfs = desk.get("timeframes", {})
 
         # Determine which TF role this timeframe plays for this desk
         tf_role = self._get_tf_role(timeframe, desk_tfs)
         if tf_role != "entry":
-            # Only generate signals from entry timeframe
             return None
 
-        # ── Scoring: WEIGHTED (new continuous) vs LEGACY (old binary) ──
-        from app.config import ENABLE_MTF_SCORING
-        if ENABLE_MTF_SCORING and MTF_SCORING == "WEIGHTED":
-            return self._evaluate_weighted(
-                symbol, timeframe, desk_id, indicators, smc,
-                candle_manager, confluence_scorer,
-            )
-        else:
-            return self._evaluate_legacy(
-                symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
-                candle_manager, confluence_scorer,
-            )
+        # ADX floor — skip for mean-reversion (low ADX is expected in ranges)
+        from app.config import ENABLE_MEAN_REVERSION, ENABLE_HMM_REGIME
+        low_adx = indicators.get("adx", 0) < MIN_ADX
+
+        # Try trend-following first (requires ADX >= 20)
+        signal = None
+        if not low_adx:
+            from app.config import ENABLE_MTF_SCORING
+            if ENABLE_MTF_SCORING and MTF_SCORING == "WEIGHTED":
+                signal = self._evaluate_weighted(
+                    symbol, timeframe, desk_id, indicators, smc,
+                    candle_manager, confluence_scorer,
+                )
+            else:
+                signal = self._evaluate_legacy(
+                    symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+                    candle_manager, confluence_scorer,
+                )
+
+        # Mean-reversion fallback: if no trend signal AND regime is RANGING
+        if signal is None and ENABLE_MEAN_REVERSION and ENABLE_HMM_REGIME:
+            regime_info = self._get_regime(symbol, candle_manager)
+            if (regime_info and regime_info.get("regime") == "RANGING"
+                    and regime_info.get("confidence", 0) > 0.5):
+                from app.services.signal_engine.mean_reversion import MeanReversionStrategy
+                mr = MeanReversionStrategy()
+                mr_result = mr.evaluate(symbol, timeframe, desk_id, indicators)
+                if mr_result:
+                    signal = self._build_payload(
+                        symbol=symbol, timeframe=timeframe, desk_id=desk_id,
+                        direction=mr_result["direction"],
+                        alert_type=mr_result["alert_type"],
+                        price=indicators.get("price", 0),
+                        sl=mr_result["sl"], tp1=mr_result["tp1"], tp2=mr_result["tp2"],
+                        confluence={"total_score": 7.0, "regime": "RANGING",
+                                    "confluence_score": 0.0, "entry_score": 0.0,
+                                    "confirm_score": 0.0, "bias_score": 0.0},
+                        indicators=indicators, smc=smc,
+                    )
+                    signal["strategy_id"] = "mean_reversion"
+                    signal["quality_score"] = 70
+                    signal["quality_tier"] = "MEDIUM"
+                    signal["quality_size_mult"] = 0.5
+                    self._set_cooldown(symbol, desk_id, mr_result["direction"])
+                    logger.info(
+                        f"SIGNAL | {symbol} {mr_result['direction']} {mr_result['alert_type']} | "
+                        f"Desk: {desk_id} | Strategy: mean_reversion | "
+                        f"RSI={indicators.get('rsi', 0):.1f}"
+                    )
+
+        return signal
 
     def _evaluate_weighted(
         self, symbol, timeframe, desk_id, indicators, smc,
