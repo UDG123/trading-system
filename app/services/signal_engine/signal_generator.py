@@ -80,7 +80,8 @@ class SignalGenerator:
             return None
 
         # ── Scoring: WEIGHTED (new continuous) vs LEGACY (old binary) ──
-        if MTF_SCORING == "WEIGHTED":
+        from app.config import ENABLE_MTF_SCORING
+        if ENABLE_MTF_SCORING and MTF_SCORING == "WEIGHTED":
             return self._evaluate_weighted(
                 symbol, timeframe, desk_id, indicators, smc,
                 candle_manager, confluence_scorer,
@@ -197,18 +198,21 @@ class SignalGenerator:
         desk = DESKS.get(desk_id, {})
 
         # ── Regime-aware filtering ──
-        regime_info = self._get_regime(symbol, candle_manager)
-        if regime_info and regime_info.get("regime") != "UNKNOWN":
-            regime = regime_info["regime"]
-            favored = regime_info.get("favor_direction")
+        from app.config import ENABLE_HMM_REGIME
+        regime_info = None
+        if ENABLE_HMM_REGIME:
+            regime_info = self._get_regime(symbol, candle_manager)
+            if regime_info and regime_info.get("regime") != "UNKNOWN":
+                regime = regime_info["regime"]
+                favored = regime_info.get("favor_direction")
 
-            # In trending regimes, skip signals against the trend
-            if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
-                return None
+                # In trending regimes, skip signals against the trend
+                if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
+                    return None
 
-            # Store regime in confluence for downstream logging
-            confluence["regime"] = regime
-            confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+                # Store regime in confluence for downstream logging
+                confluence["regime"] = regime
+                confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
 
         alert_type = self._classify_signal(direction, indicators, smc, confluence)
         if alert_type not in VALID_ALERT_TYPES:
@@ -241,60 +245,63 @@ class SignalGenerator:
                 return None
 
         # ── Quality Score Gate ──
-        quality_scorer = SignalQualityScorer()
+        from app.config import ENABLE_QUALITY_SCORER
+        quality = None
+        if ENABLE_QUALITY_SCORER:
+            quality_scorer = SignalQualityScorer()
 
-        # Try to get CatBoost probability for quality scoring
-        catboost_proba = None
-        try:
-            from app.services.meta_labeler import MetaLabeler
-            _meta = MetaLabeler()
-            if _meta._model is not None:
-                from datetime import datetime as _dt, timezone as _tz
-                _now = _dt.now(_tz.utc)
-                meta_features = {
-                    "consensus_score": confluence.get("total_score", 0),
-                    "ml_score": 0.5,
-                    "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
-                    "rsi": indicators.get("rsi", 50),
-                    "adx": indicators.get("adx", 20),
-                    "atr_pct": indicators.get("atr_pct", 0),
-                    "rvol": indicators.get("rvol", 1),
-                    "hour_utc": _now.hour,
-                    "day_of_week": _now.weekday(),
-                    "vix_level": 20,
-                }
-                meta_result = _meta.predict(meta_features)
-                catboost_proba = meta_result.get("meta_probability")
-        except Exception:
-            pass
+            # Try to get CatBoost probability for quality scoring
+            catboost_proba = None
+            try:
+                from app.services.meta_labeler import MetaLabeler
+                _meta = MetaLabeler()
+                if _meta._model is not None:
+                    from datetime import datetime as _dt, timezone as _tz
+                    _now = _dt.now(_tz.utc)
+                    meta_features = {
+                        "consensus_score": confluence.get("total_score", 0),
+                        "ml_score": 0.5,
+                        "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
+                        "rsi": indicators.get("rsi", 50),
+                        "adx": indicators.get("adx", 20),
+                        "atr_pct": indicators.get("atr_pct", 0),
+                        "rvol": indicators.get("rvol", 1),
+                        "hour_utc": _now.hour,
+                        "day_of_week": _now.weekday(),
+                        "vix_level": 20,
+                    }
+                    meta_result = _meta.predict(meta_features)
+                    catboost_proba = meta_result.get("meta_probability")
+            except Exception:
+                pass
 
-        # Add candle body ratio to indicators for quality scoring
-        if candle_manager:
-            df = candle_manager.get_dataframe(symbol, timeframe)
-            if df is not None and len(df) >= 1:
-                last = df.iloc[-1]
-                bar_range = float(last["high"]) - float(last["low"])
-                if bar_range > 0:
-                    indicators["candle_body_ratio"] = abs(
-                        float(last["close"]) - float(last["open"])
-                    ) / bar_range
+            # Add candle body ratio to indicators for quality scoring
+            if candle_manager:
+                df = candle_manager.get_dataframe(symbol, timeframe)
+                if df is not None and len(df) >= 1:
+                    last = df.iloc[-1]
+                    bar_range = float(last["high"]) - float(last["low"])
+                    if bar_range > 0:
+                        indicators["candle_body_ratio"] = abs(
+                            float(last["close"]) - float(last["open"])
+                        ) / bar_range
 
-        quality = quality_scorer.score(
-            confluence=confluence,
-            indicators=indicators,
-            smc=smc,
-            alert_type=alert_type,
-            catboost_proba=catboost_proba,
-        )
-
-        if not quality["emit"]:
-            logger.info(
-                f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
-                f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
-                f"(threshold: {quality['threshold']}) | "
-                f"Breakdown: {quality['breakdown']}"
+            quality = quality_scorer.score(
+                confluence=confluence,
+                indicators=indicators,
+                smc=smc,
+                alert_type=alert_type,
+                catboost_proba=catboost_proba,
             )
-            return None
+
+            if not quality["emit"]:
+                logger.info(
+                    f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
+                    f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
+                    f"(threshold: {quality['threshold']}) | "
+                    f"Breakdown: {quality['breakdown']}"
+                )
+                return None
 
         signal = self._build_payload(
             symbol=symbol,
@@ -310,10 +317,11 @@ class SignalGenerator:
         )
 
         # Attach quality score and size multiplier to payload
-        signal["quality_score"] = quality["quality_score"]
-        signal["quality_tier"] = quality["tier"]
-        signal["quality_size_mult"] = quality["size_multiplier"]
-        signal["quality_breakdown"] = quality["breakdown"]
+        if quality:
+            signal["quality_score"] = quality["quality_score"]
+            signal["quality_tier"] = quality["tier"]
+            signal["quality_size_mult"] = quality["size_multiplier"]
+            signal["quality_breakdown"] = quality["breakdown"]
 
         self._set_cooldown(symbol, desk_id, direction)
 

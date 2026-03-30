@@ -412,76 +412,96 @@ class VirtualBroker:
                     exit_reason = "SL_HIT"
                     exit_price = pos.stop_loss
 
-            # ── Tier 1: Close 33% at 1R, move SL to breakeven ──
-            if not exit_reason and partial_pct < 33:
-                tier1_target = entry + risk_distance if direction == "LONG" else entry - risk_distance
-                hit = (direction == "LONG" and price >= tier1_target) or \
-                      (direction == "SHORT" and price <= tier1_target)
-                if hit:
-                    tier1_pips = risk_distance / pip_size  # 1R in pips
-                    tier1_pnl = round(tier1_pips * pip_value * pos.lot_size * 0.33, 2)
-                    pos.partial_close_pct = 33.0
-                    pos.partial_pnl = (pos.partial_pnl or 0) + tier1_pnl
-                    pos.partial_pnl_tier1 = tier1_pnl
-                    # Move SL to breakeven
-                    pos.stop_loss = entry
-                    pos.breakeven_price = entry
-                    pos.status = "PARTIAL"
-                    logger.debug(
-                        f"TIER1 | {pos.symbol} {direction} | 33% closed at 1R | "
-                        f"PnL: ${tier1_pnl} | SL→BE"
-                    )
+            from app.config import ENABLE_PARTIAL_EXITS
+            if ENABLE_PARTIAL_EXITS:
+                # ── Tier 1: Close 33% at 1R, move SL to breakeven ──
+                if not exit_reason and partial_pct < 33:
+                    tier1_target = entry + risk_distance if direction == "LONG" else entry - risk_distance
+                    hit = (direction == "LONG" and price >= tier1_target) or \
+                          (direction == "SHORT" and price <= tier1_target)
+                    if hit:
+                        tier1_pips = risk_distance / pip_size  # 1R in pips
+                        tier1_pnl = round(tier1_pips * pip_value * pos.lot_size * 0.33, 2)
+                        pos.partial_close_pct = 33.0
+                        pos.partial_pnl = (pos.partial_pnl or 0) + tier1_pnl
+                        pos.partial_pnl_tier1 = tier1_pnl
+                        # Move SL to breakeven
+                        pos.stop_loss = entry
+                        pos.breakeven_price = entry
+                        pos.status = "PARTIAL"
+                        logger.debug(
+                            f"TIER1 | {pos.symbol} {direction} | 33% closed at 1R | "
+                            f"PnL: ${tier1_pnl} | SL→BE"
+                        )
 
-            # ── Tier 2: Close 33% at 3R, trail SL to 1R level ──
-            if not exit_reason and 33 <= partial_pct < 66:
-                tier2_target = entry + (risk_distance * 3) if direction == "LONG" else entry - (risk_distance * 3)
-                hit = (direction == "LONG" and price >= tier2_target) or \
-                      (direction == "SHORT" and price <= tier2_target)
-                if hit:
-                    tier2_pips = (risk_distance * 3) / pip_size
-                    tier2_pnl = round(tier2_pips * pip_value * pos.lot_size * 0.33, 2)
-                    pos.partial_close_pct = 66.0
-                    pos.partial_pnl = (pos.partial_pnl or 0) + tier2_pnl
-                    pos.partial_pnl_tier2 = tier2_pnl
-                    # Trail SL to 1R profit level
-                    if direction == "LONG":
-                        pos.stop_loss = entry + risk_distance
-                    else:
-                        pos.stop_loss = entry - risk_distance
-                    pos.status = "PARTIAL"
-                    logger.debug(
-                        f"TIER2 | {pos.symbol} {direction} | 33% closed at 3R | "
-                        f"PnL: ${tier2_pnl} | SL→1R"
-                    )
+                # ── Tier 2: Close 33% at 3R, trail SL to 1R level ──
+                if not exit_reason and 33 <= partial_pct < 66:
+                    tier2_target = entry + (risk_distance * 3) if direction == "LONG" else entry - (risk_distance * 3)
+                    hit = (direction == "LONG" and price >= tier2_target) or \
+                          (direction == "SHORT" and price <= tier2_target)
+                    if hit:
+                        tier2_pips = (risk_distance * 3) / pip_size
+                        tier2_pnl = round(tier2_pips * pip_value * pos.lot_size * 0.33, 2)
+                        pos.partial_close_pct = 66.0
+                        pos.partial_pnl = (pos.partial_pnl or 0) + tier2_pnl
+                        pos.partial_pnl_tier2 = tier2_pnl
+                        # Trail SL to 1R profit level
+                        if direction == "LONG":
+                            pos.stop_loss = entry + risk_distance
+                        else:
+                            pos.stop_loss = entry - risk_distance
+                        pos.status = "PARTIAL"
+                        logger.debug(
+                            f"TIER2 | {pos.symbol} {direction} | 33% closed at 3R | "
+                            f"PnL: ${tier2_pnl} | SL→1R"
+                        )
 
-            # ── Tier 3: Trail remaining 34% with chandelier stop ──
-            if not exit_reason and partial_pct >= 66:
-                chandelier_stop = self._compute_chandelier_stop(
-                    pos.symbol, direction, db
-                )
-                if chandelier_stop:
-                    pos.trailing_stop = chandelier_stop
-                    if direction == "LONG" and price <= chandelier_stop:
-                        exit_reason = "TRAILING_T3"
-                        exit_price = chandelier_stop
-                        pos.exit_tier = 3
-                    elif direction == "SHORT" and price >= chandelier_stop:
-                        exit_reason = "TRAILING_T3"
-                        exit_price = chandelier_stop
-                        pos.exit_tier = 3
-
-            # ── Zombie trade time-based exit ──
-            if not exit_reason and pos.entry_time:
-                zombie_limit = self.ZOMBIE_LIMITS.get(pos.desk_id, 1440)
-                hold_mins = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
-                if hold_mins >= zombie_limit and current_r < 0.5:
-                    exit_reason = "ZOMBIE_EXIT"
-                    exit_price = price
-                    pos.time_based_exit = True
-                    logger.debug(
-                        f"ZOMBIE | {pos.symbol} {direction} | {hold_mins:.0f}min | "
-                        f"R={current_r:.2f} < 0.5R — closing"
+                # ── Tier 3: Trail remaining 34% with chandelier stop ──
+                if not exit_reason and partial_pct >= 66:
+                    chandelier_stop = self._compute_chandelier_stop(
+                        pos.symbol, direction, db
                     )
+                    if chandelier_stop:
+                        pos.trailing_stop = chandelier_stop
+                        if direction == "LONG" and price <= chandelier_stop:
+                            exit_reason = "TRAILING_T3"
+                            exit_price = chandelier_stop
+                            pos.exit_tier = 3
+                        elif direction == "SHORT" and price >= chandelier_stop:
+                            exit_reason = "TRAILING_T3"
+                            exit_price = chandelier_stop
+                            pos.exit_tier = 3
+
+                # ── Zombie trade time-based exit ──
+                if not exit_reason and pos.entry_time:
+                    zombie_limit = self.ZOMBIE_LIMITS.get(pos.desk_id, 1440)
+                    hold_mins = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+                    if hold_mins >= zombie_limit and current_r < 0.5:
+                        exit_reason = "ZOMBIE_EXIT"
+                        exit_price = price
+                        pos.time_based_exit = True
+                        logger.debug(
+                            f"ZOMBIE | {pos.symbol} {direction} | {hold_mins:.0f}min | "
+                            f"R={current_r:.2f} < 0.5R — closing"
+                        )
+
+            else:
+                # ── Legacy simple exits: TP1/TP2/trailing ──
+                if not exit_reason and pos.take_profit_1:
+                    if (direction == "LONG" and price >= pos.take_profit_1) or \
+                       (direction == "SHORT" and price <= pos.take_profit_1):
+                        exit_reason = "TP1_HIT"
+                        exit_price = pos.take_profit_1
+                if not exit_reason and pos.take_profit_2:
+                    if (direction == "LONG" and price >= pos.take_profit_2) or \
+                       (direction == "SHORT" and price <= pos.take_profit_2):
+                        exit_reason = "TP2_HIT"
+                        exit_price = pos.take_profit_2
+                if not exit_reason and pos.trailing_stop:
+                    if (direction == "LONG" and price <= pos.trailing_stop) or \
+                       (direction == "SHORT" and price >= pos.trailing_stop):
+                        exit_reason = "TRAILING"
+                        exit_price = pos.trailing_stop
 
             # ── Hard time exit (desk max_hold_hours) ──
             if not exit_reason and pos.entry_time:

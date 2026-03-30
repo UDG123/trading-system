@@ -535,6 +535,18 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Signal Engine disabled (SIGNAL_SOURCE={SIGNAL_SOURCE})")
 
+    # ── Log feature flags ──
+    from app.config import (
+        ENABLE_MARKET_HOURS_FILTER, ENABLE_HMM_REGIME, ENABLE_MTF_SCORING,
+        ENABLE_QUALITY_SCORER, ENABLE_META_LABELER, ENABLE_VOL_TARGETING,
+        ENABLE_PARTIAL_EXITS,
+    )
+    logger.info(
+        f"Feature flags: MH={ENABLE_MARKET_HOURS_FILTER} HMM={ENABLE_HMM_REGIME} "
+        f"MTF={ENABLE_MTF_SCORING} QS={ENABLE_QUALITY_SCORER} "
+        f"ML={ENABLE_META_LABELER} VT={ENABLE_VOL_TARGETING} PE={ENABLE_PARTIAL_EXITS}"
+    )
+
     # ── Quant Stack Scheduled Jobs ──
     try:
         from apscheduler.triggers.cron import CronTrigger
