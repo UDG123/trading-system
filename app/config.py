@@ -48,6 +48,9 @@ MTF_SCORING = os.getenv("MTF_SCORING", "WEIGHTED")
 # Signal quality score threshold (0-100). Signals below this are skipped.
 QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "65"))
 
+# Pipeline version: "v1" (17-step with CTO gate) or "v2" (5-step streamlined)
+PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v2")
+
 # ── v7 Feature Flags ──
 ENABLE_MARKET_HOURS_FILTER = os.getenv("ENABLE_MARKET_HOURS_FILTER", "true").lower() in ("true", "1")
 ENABLE_HMM_REGIME = os.getenv("ENABLE_HMM_REGIME", "true").lower() in ("true", "1")

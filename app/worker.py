@@ -481,7 +481,14 @@ class VerificationWorker:
         Create Signal record → Pipeline → Shadow update → VirtualBroker sim.
         """
         from app.models.signal import Signal
-        from app.services.pipeline import process_signal
+
+        # Route to pipeline v1 or v2 based on env var
+        PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v2")
+        if PIPELINE_VERSION == "v2":
+            from app.services.pipeline_v2 import PipelineV2
+            _pipeline_v2 = PipelineV2()
+        else:
+            from app.services.pipeline import process_signal
 
         db = self._db_session_factory()
         try:
@@ -518,11 +525,17 @@ class VerificationWorker:
                 f"{payload.get('alert_type')}"
             )
 
-            # Route to full pipeline for enrichment → ML → CTO → execution
+            # Route to pipeline (v1 or v2)
             latency_ms = payload.get("webhook_latency_ms")
-            result = await process_signal(
-                signal_record.id, db, webhook_latency_ms=latency_ms
-            )
+            if PIPELINE_VERSION == "v2":
+                result = await _pipeline_v2.process_signal(
+                    signal_record.id, db, webhook_latency_ms=latency_ms,
+                    redis=self._redis,
+                )
+            else:
+                result = await process_signal(
+                    signal_record.id, db, webhook_latency_ms=latency_ms
+                )
 
             logger.info(
                 f"PIPELINE #{signal_record.id}: "
