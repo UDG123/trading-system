@@ -163,6 +163,22 @@ class SignalEngine:
                 )
                 self._poll_tasks.append(task)
 
+            # Phase 4: Desk scanner loops (strategy stack evaluation)
+            from app.services.signal_engine.desk_scanner import DeskScanner, SCAN_INTERVALS
+            scanner = DeskScanner(self.candle_manager)
+
+            for desk_id, interval_sec in SCAN_INTERVALS.items():
+                task = asyncio.create_task(
+                    self._desk_scan_loop(scanner, desk_id, interval_sec),
+                    name=f"scan_{desk_id}",
+                )
+                self._poll_tasks.append(task)
+
+            logger.info(
+                f"Desk scanners started: "
+                + ", ".join(f"{d}@{s}s" for d, s in SCAN_INTERVALS.items())
+            )
+
             td_count = len(TD_ONLY_SYMBOLS)
             free_count = len(all_symbols) - td_count
             logger.info(
@@ -290,6 +306,32 @@ class SignalEngine:
             remaining = max(0, interval_seconds - elapsed)
             if remaining > 0:
                 await asyncio.sleep(remaining)
+
+    async def _desk_scan_loop(
+        self, scanner, desk_id: str, interval_seconds: int,
+    ) -> None:
+        """Run strategy stack scans for a desk on a fixed interval."""
+        from app.services.signal_engine.desk_scanner import DeskScanner
+
+        # Stagger start by desk order
+        desk_order = list(DESKS.keys())
+        stagger = desk_order.index(desk_id) * 3 if desk_id in desk_order else 0
+        await asyncio.sleep(stagger + 10)  # Let data streams warm up first
+
+        logger.info(f"Desk scan loop started | {desk_id} | every {interval_seconds}s")
+
+        while self._running:
+            try:
+                candidates = scanner.scan_desk(desk_id)
+
+                for candidate in candidates:
+                    payload = DeskScanner.build_signal_payload(candidate)
+                    if not await self.dedup.is_duplicate(payload):
+                        await self._emit_signal(payload)
+            except Exception as e:
+                logger.debug(f"Desk scan error for {desk_id}: {e}")
+
+            await asyncio.sleep(interval_seconds)
 
     async def _emit_signal(self, signal: Dict) -> None:
         """Push signal to Redis Stream in the format worker expects."""
