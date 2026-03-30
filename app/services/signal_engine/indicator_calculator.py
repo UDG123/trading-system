@@ -257,6 +257,35 @@ class IndicatorCalculator:
             else:
                 result["squeeze"] = False
 
+            # ── Ichimoku Cloud (for trend filtering) ──
+            try:
+                from ta.trend import IchimokuIndicator
+                ichi = IchimokuIndicator(high=high, low=low, close=close, window1=9, window2=26, window3=52)
+                span_a = _safe_last(ichi.ichimoku_a())
+                span_b = _safe_last(ichi.ichimoku_b())
+                result["ichimoku_span_a"] = span_a
+                result["ichimoku_span_b"] = span_b
+                if span_a is not None and span_b is not None:
+                    cloud_top = max(span_a, span_b)
+                    cloud_bottom = min(span_a, span_b)
+                    result["ichimoku_cloud_top"] = cloud_top
+                    result["ichimoku_cloud_bottom"] = cloud_bottom
+                    result["price_above_cloud"] = latest > cloud_top
+                    result["price_below_cloud"] = latest < cloud_bottom
+                    result["price_in_cloud"] = cloud_bottom <= latest <= cloud_top
+                else:
+                    result["ichimoku_cloud_top"] = None
+                    result["ichimoku_cloud_bottom"] = None
+                    result["price_above_cloud"] = None
+                    result["price_below_cloud"] = None
+                    result["price_in_cloud"] = None
+            except Exception:
+                result["ichimoku_cloud_top"] = None
+                result["ichimoku_cloud_bottom"] = None
+                result["price_above_cloud"] = None
+                result["price_below_cloud"] = None
+                result["price_in_cloud"] = None
+
             # ── RVOL (Relative Volume) ──
             if len(volume) >= 20 and volume.iloc[-1] > 0:
                 avg_vol = volume.iloc[-21:-1].mean()

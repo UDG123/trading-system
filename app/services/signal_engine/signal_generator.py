@@ -214,6 +214,25 @@ class SignalGenerator:
                 confluence["regime"] = regime
                 confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
 
+        # ── Ichimoku Cloud trend filter — prevents counter-trend trades ──
+        from app.config import ENABLE_ICHIMOKU_FILTER
+        if ENABLE_ICHIMOKU_FILTER:
+            price_above = indicators.get("price_above_cloud")
+            price_below = indicators.get("price_below_cloud")
+            if price_above is not None:
+                if direction == "SHORT" and price_above:
+                    logger.info(
+                        f"ICHIMOKU BLOCK | {symbol} SHORT blocked — price above cloud | "
+                        f"Desk: {desk_id}"
+                    )
+                    return None
+                if direction == "LONG" and price_below:
+                    logger.info(
+                        f"ICHIMOKU BLOCK | {symbol} LONG blocked — price below cloud | "
+                        f"Desk: {desk_id}"
+                    )
+                    return None
+
         alert_type = self._classify_signal(direction, indicators, smc, confluence)
         if alert_type not in VALID_ALERT_TYPES:
             return None
