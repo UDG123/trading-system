@@ -116,39 +116,61 @@ class TripleBarrierLabeler:
         if pip_size <= 0:
             pip_size = 0.0001
 
-        # Determine barriers
-        atr_cfg = get_atr_settings(desk_id, symbol, timeframe)
-        sl_mult = atr_cfg.get("sl_mult", 2.0)
-        tp_mult = atr_cfg.get("tp1_mult", 4.0)
+        # ── Dynamic ATR-based barriers (v7.1) ──
+        # Use ATR from enrichment_data if available for tighter, volatility-calibrated barriers.
+        # Falls back to explicit SL/TP, then desk ATR config, then percentage-based.
+        atr = None
+        if signal.enrichment_data and isinstance(signal.enrichment_data, dict):
+            atr = signal.enrichment_data.get("atr")
+        if not atr and signal.atr:
+            atr = signal.atr
 
-        # Use explicit SL/TP if available, otherwise ATR-computed
-        if signal.sl1 and signal.tp1:
+        if atr and atr > 0:
+            # ATR-scaled barriers by desk style
+            desk_barrier_config = {
+                "DESK1_SCALPER":  {"tp_mult": 1.5, "sl_mult": 1.0, "max_bars": 90},
+                "DESK2_INTRADAY": {"tp_mult": 2.0, "sl_mult": 1.5, "max_bars": 480},
+                "DESK3_SWING":    {"tp_mult": 3.0, "sl_mult": 2.0, "max_bars": 7200},
+                "DESK4_GOLD":     {"tp_mult": 2.0, "sl_mult": 1.5, "max_bars": 360},
+                "DESK5_ALTS":     {"tp_mult": 2.5, "sl_mult": 1.5, "max_bars": 1440},
+                "DESK6_EQUITIES": {"tp_mult": 2.0, "sl_mult": 1.5, "max_bars": 420},
+            }
+            bc = desk_barrier_config.get(desk_id, {"tp_mult": 2.0, "sl_mult": 1.5, "max_bars": 480})
+
+            if direction == "LONG":
+                upper_barrier = entry_price + (atr * bc["tp_mult"])
+                lower_barrier = entry_price - (atr * bc["sl_mult"])
+            else:
+                upper_barrier = entry_price + (atr * bc["sl_mult"])
+                lower_barrier = entry_price - (atr * bc["tp_mult"])
+
+            max_hold_bars = bc["max_bars"]
+
+            logger.debug(
+                f"Barrier calibration | {symbol} {desk_id} | "
+                f"ATR={atr:.5f} | TP={upper_barrier:.5f} SL={lower_barrier:.5f} | "
+                f"max_bars={max_hold_bars}"
+            )
+        elif signal.sl1 and signal.tp1:
+            # Fall back to explicit SL/TP from signal
             if direction == "LONG":
                 upper_barrier = signal.tp1
                 lower_barrier = signal.sl1
             else:
-                upper_barrier = signal.sl1  # For SHORT, SL is above
-                lower_barrier = signal.tp1  # TP is below
-        elif signal.atr and signal.atr > 0:
-            atr = signal.atr
-            if direction == "LONG":
-                upper_barrier = entry_price + (atr * tp_mult)
-                lower_barrier = entry_price - (atr * sl_mult)
-            else:
-                upper_barrier = entry_price + (atr * sl_mult)
-                lower_barrier = entry_price - (atr * tp_mult)
+                upper_barrier = signal.sl1
+                lower_barrier = signal.tp1
+            max_hold_bars = self._get_max_hold_bars(desk_id, timeframe)
         else:
             # Fallback: use percentage-based barriers
-            sl_pct = 0.01  # 1%
-            tp_pct = 0.02  # 2%
+            sl_pct = 0.01
+            tp_pct = 0.02
             if direction == "LONG":
                 upper_barrier = entry_price * (1 + tp_pct)
                 lower_barrier = entry_price * (1 - sl_pct)
             else:
                 upper_barrier = entry_price * (1 + sl_pct)
                 lower_barrier = entry_price * (1 - tp_pct)
-
-        max_hold_bars = self._get_max_hold_bars(desk_id, timeframe)
+            max_hold_bars = self._get_max_hold_bars(desk_id, timeframe)
 
         # Get OHLCV bars from ohlcv_1m table
         bars = self._get_ohlcv_bars(db, symbol, signal.created_at, max_hold_bars)
@@ -212,16 +234,44 @@ class TripleBarrierLabeler:
             if hold_bars >= max_hold_bars:
                 exit_price = bar_close
                 if direction == "LONG":
-                    ret = (bar_close - entry_price) / pip_size
+                    pnl_at_timeout = (bar_close - entry_price) / pip_size
                 else:
-                    ret = (entry_price - bar_close) / pip_size
-                label = 0  # TIMEOUT, but sign by return
-                barrier_hit = "TIMEOUT"
+                    pnl_at_timeout = (entry_price - bar_close) / pip_size
+
+                # Relabel timeouts based on actual P&L
+                if pnl_at_timeout > 5:
+                    label = 1    # Partial win
+                    barrier_hit = "TIMEOUT_WIN"
+                elif pnl_at_timeout < -5:
+                    label = -1   # Partial loss
+                    barrier_hit = "TIMEOUT_LOSS"
+                else:
+                    label = 0    # True timeout (flat)
+                    barrier_hit = "TIMEOUT_FLAT"
                 break
 
         if label is None:
-            # Didn't reach any barrier (not enough bars)
-            return False
+            # Didn't reach any barrier — check if we have enough bars for a partial label
+            if bars:
+                last_close = float(bars[-1]["close"])
+                if direction == "LONG":
+                    pnl_at_end = (last_close - entry_price) / pip_size
+                else:
+                    pnl_at_end = (entry_price - last_close) / pip_size
+
+                if pnl_at_end > 5:
+                    label = 1
+                    barrier_hit = "TIMEOUT_WIN"
+                    exit_price = last_close
+                elif pnl_at_end < -5:
+                    label = -1
+                    barrier_hit = "TIMEOUT_LOSS"
+                    exit_price = last_close
+                else:
+                    # Not enough bars and flat — skip labeling for now
+                    return False
+            else:
+                return False
 
         # Compute return
         if exit_price:
