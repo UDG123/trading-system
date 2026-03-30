@@ -66,30 +66,65 @@ class SignalGenerator:
         if not is_valid_trading_hour(symbol, desk_id):
             return None
 
-        # ADX floor
-        if indicators.get("adx", 0) < MIN_ADX:
-            return None
-
         desk = DESKS.get(desk_id, {})
         desk_tfs = desk.get("timeframes", {})
 
         # Determine which TF role this timeframe plays for this desk
         tf_role = self._get_tf_role(timeframe, desk_tfs)
         if tf_role != "entry":
-            # Only generate signals from entry timeframe
             return None
 
-        # ── Scoring: WEIGHTED (new continuous) vs LEGACY (old binary) ──
-        if MTF_SCORING == "WEIGHTED":
-            return self._evaluate_weighted(
-                symbol, timeframe, desk_id, indicators, smc,
-                candle_manager, confluence_scorer,
-            )
-        else:
-            return self._evaluate_legacy(
-                symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
-                candle_manager, confluence_scorer,
-            )
+        # ADX floor — skip for mean-reversion (low ADX is expected in ranges)
+        from app.config import ENABLE_MEAN_REVERSION, ENABLE_HMM_REGIME
+        low_adx = indicators.get("adx", 0) < MIN_ADX
+
+        # Try trend-following first (requires ADX >= 20)
+        signal = None
+        if not low_adx:
+            from app.config import ENABLE_MTF_SCORING
+            if ENABLE_MTF_SCORING and MTF_SCORING == "WEIGHTED":
+                signal = self._evaluate_weighted(
+                    symbol, timeframe, desk_id, indicators, smc,
+                    candle_manager, confluence_scorer,
+                )
+            else:
+                signal = self._evaluate_legacy(
+                    symbol, timeframe, desk_id, desk, desk_tfs, indicators, smc,
+                    candle_manager, confluence_scorer,
+                )
+
+        # Mean-reversion fallback: if no trend signal AND regime is RANGING
+        if signal is None and ENABLE_MEAN_REVERSION and ENABLE_HMM_REGIME:
+            regime_info = self._get_regime(symbol, candle_manager)
+            if (regime_info and regime_info.get("regime") == "RANGING"
+                    and regime_info.get("confidence", 0) > 0.5):
+                from app.services.signal_engine.mean_reversion import MeanReversionStrategy
+                mr = MeanReversionStrategy()
+                mr_result = mr.evaluate(symbol, timeframe, desk_id, indicators)
+                if mr_result:
+                    signal = self._build_payload(
+                        symbol=symbol, timeframe=timeframe, desk_id=desk_id,
+                        direction=mr_result["direction"],
+                        alert_type=mr_result["alert_type"],
+                        price=indicators.get("price", 0),
+                        sl=mr_result["sl"], tp1=mr_result["tp1"], tp2=mr_result["tp2"],
+                        confluence={"total_score": 7.0, "regime": "RANGING",
+                                    "confluence_score": 0.0, "entry_score": 0.0,
+                                    "confirm_score": 0.0, "bias_score": 0.0},
+                        indicators=indicators, smc=smc,
+                    )
+                    signal["strategy_id"] = "mean_reversion"
+                    signal["quality_score"] = 70
+                    signal["quality_tier"] = "MEDIUM"
+                    signal["quality_size_mult"] = 0.5
+                    self._set_cooldown(symbol, desk_id, mr_result["direction"])
+                    logger.info(
+                        f"SIGNAL | {symbol} {mr_result['direction']} {mr_result['alert_type']} | "
+                        f"Desk: {desk_id} | Strategy: mean_reversion | "
+                        f"RSI={indicators.get('rsi', 0):.1f}"
+                    )
+
+        return signal
 
     def _evaluate_weighted(
         self, symbol, timeframe, desk_id, indicators, smc,
@@ -197,18 +232,52 @@ class SignalGenerator:
         desk = DESKS.get(desk_id, {})
 
         # ── Regime-aware filtering ──
-        regime_info = self._get_regime(symbol, candle_manager)
-        if regime_info and regime_info.get("regime") != "UNKNOWN":
-            regime = regime_info["regime"]
-            favored = regime_info.get("favor_direction")
+        from app.config import ENABLE_HMM_REGIME
+        regime_info = None
+        if ENABLE_HMM_REGIME:
+            regime_info = self._get_regime(symbol, candle_manager)
+            if regime_info and regime_info.get("regime") != "UNKNOWN":
+                regime = regime_info["regime"]
+                favored = regime_info.get("favor_direction")
 
-            # In trending regimes, skip signals against the trend
-            if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
-                return None
+                # In trending regimes, skip signals against the trend
+                if favored and direction != favored and regime_info.get("confidence", 0) > 0.6:
+                    return None
 
-            # Store regime in confluence for downstream logging
-            confluence["regime"] = regime
-            confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+                # Store regime in confluence for downstream logging
+                confluence["regime"] = regime
+                confluence["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
+
+        # ── Ichimoku Cloud trend filter — prevents counter-trend trades ──
+        from app.config import ENABLE_ICHIMOKU_FILTER
+        if ENABLE_ICHIMOKU_FILTER:
+            price_above = indicators.get("price_above_cloud")
+            price_below = indicators.get("price_below_cloud")
+            if price_above is not None:
+                if direction == "SHORT" and price_above:
+                    logger.info(
+                        f"ICHIMOKU BLOCK | {symbol} SHORT blocked — price above cloud | "
+                        f"Desk: {desk_id}"
+                    )
+                    return None
+                if direction == "LONG" and price_below:
+                    logger.info(
+                        f"ICHIMOKU BLOCK | {symbol} LONG blocked — price below cloud | "
+                        f"Desk: {desk_id}"
+                    )
+                    return None
+
+        # ── Economic calendar blackout — block near high-impact events ──
+        from app.config import ENABLE_ECON_CALENDAR
+        if ENABLE_ECON_CALENDAR:
+            try:
+                from app.services.econ_calendar import is_near_high_impact_event
+                blocked, event_name = is_near_high_impact_event(symbol, minutes_before=30, minutes_after=15)
+                if blocked:
+                    logger.info(f"ECON BLOCK | {symbol} blocked — {event_name} | Desk: {desk_id}")
+                    return None
+            except Exception:
+                pass
 
         alert_type = self._classify_signal(direction, indicators, smc, confluence)
         if alert_type not in VALID_ALERT_TYPES:
@@ -241,60 +310,63 @@ class SignalGenerator:
                 return None
 
         # ── Quality Score Gate ──
-        quality_scorer = SignalQualityScorer()
+        from app.config import ENABLE_QUALITY_SCORER
+        quality = None
+        if ENABLE_QUALITY_SCORER:
+            quality_scorer = SignalQualityScorer()
 
-        # Try to get CatBoost probability for quality scoring
-        catboost_proba = None
-        try:
-            from app.services.meta_labeler import MetaLabeler
-            _meta = MetaLabeler()
-            if _meta._model is not None:
-                from datetime import datetime as _dt, timezone as _tz
-                _now = _dt.now(_tz.utc)
-                meta_features = {
-                    "consensus_score": confluence.get("total_score", 0),
-                    "ml_score": 0.5,
-                    "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
-                    "rsi": indicators.get("rsi", 50),
-                    "adx": indicators.get("adx", 20),
-                    "atr_pct": indicators.get("atr_pct", 0),
-                    "rvol": indicators.get("rvol", 1),
-                    "hour_utc": _now.hour,
-                    "day_of_week": _now.weekday(),
-                    "vix_level": 20,
-                }
-                meta_result = _meta.predict(meta_features)
-                catboost_proba = meta_result.get("meta_probability")
-        except Exception:
-            pass
+            # Try to get CatBoost probability for quality scoring
+            catboost_proba = None
+            try:
+                from app.services.meta_labeler import MetaLabeler
+                _meta = MetaLabeler()
+                if _meta._model is not None:
+                    from datetime import datetime as _dt, timezone as _tz
+                    _now = _dt.now(_tz.utc)
+                    meta_features = {
+                        "consensus_score": confluence.get("total_score", 0),
+                        "ml_score": 0.5,
+                        "hurst": indicators.get("hurst", 0.5) if indicators else 0.5,
+                        "rsi": indicators.get("rsi", 50),
+                        "adx": indicators.get("adx", 20),
+                        "atr_pct": indicators.get("atr_pct", 0),
+                        "rvol": indicators.get("rvol", 1),
+                        "hour_utc": _now.hour,
+                        "day_of_week": _now.weekday(),
+                        "vix_level": 20,
+                    }
+                    meta_result = _meta.predict(meta_features)
+                    catboost_proba = meta_result.get("meta_probability")
+            except Exception:
+                pass
 
-        # Add candle body ratio to indicators for quality scoring
-        if candle_manager:
-            df = candle_manager.get_dataframe(symbol, timeframe)
-            if df is not None and len(df) >= 1:
-                last = df.iloc[-1]
-                bar_range = float(last["high"]) - float(last["low"])
-                if bar_range > 0:
-                    indicators["candle_body_ratio"] = abs(
-                        float(last["close"]) - float(last["open"])
-                    ) / bar_range
+            # Add candle body ratio to indicators for quality scoring
+            if candle_manager:
+                df = candle_manager.get_dataframe(symbol, timeframe)
+                if df is not None and len(df) >= 1:
+                    last = df.iloc[-1]
+                    bar_range = float(last["high"]) - float(last["low"])
+                    if bar_range > 0:
+                        indicators["candle_body_ratio"] = abs(
+                            float(last["close"]) - float(last["open"])
+                        ) / bar_range
 
-        quality = quality_scorer.score(
-            confluence=confluence,
-            indicators=indicators,
-            smc=smc,
-            alert_type=alert_type,
-            catboost_proba=catboost_proba,
-        )
-
-        if not quality["emit"]:
-            logger.info(
-                f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
-                f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
-                f"(threshold: {quality['threshold']}) | "
-                f"Breakdown: {quality['breakdown']}"
+            quality = quality_scorer.score(
+                confluence=confluence,
+                indicators=indicators,
+                smc=smc,
+                alert_type=alert_type,
+                catboost_proba=catboost_proba,
             )
-            return None
+
+            if not quality["emit"]:
+                logger.info(
+                    f"QUALITY SKIP | {symbol} {direction} {alert_type} | "
+                    f"Desk: {desk_id} | Score: {quality['quality_score']}/100 "
+                    f"(threshold: {quality['threshold']}) | "
+                    f"Breakdown: {quality['breakdown']}"
+                )
+                return None
 
         signal = self._build_payload(
             symbol=symbol,
@@ -310,10 +382,11 @@ class SignalGenerator:
         )
 
         # Attach quality score and size multiplier to payload
-        signal["quality_score"] = quality["quality_score"]
-        signal["quality_tier"] = quality["tier"]
-        signal["quality_size_mult"] = quality["size_multiplier"]
-        signal["quality_breakdown"] = quality["breakdown"]
+        if quality:
+            signal["quality_score"] = quality["quality_score"]
+            signal["quality_tier"] = quality["tier"]
+            signal["quality_size_mult"] = quality["size_multiplier"]
+            signal["quality_breakdown"] = quality["breakdown"]
 
         self._set_cooldown(symbol, desk_id, direction)
 

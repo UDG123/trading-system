@@ -44,6 +44,22 @@ MTF_SCORING = os.getenv("MTF_SCORING", "WEIGHTED")
 # Signal quality score threshold (0-100). Signals below this are skipped.
 QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "65"))
 
+# ── v7 Feature Flags ──
+ENABLE_MARKET_HOURS_FILTER = os.getenv("ENABLE_MARKET_HOURS_FILTER", "true").lower() in ("true", "1")
+ENABLE_HMM_REGIME = os.getenv("ENABLE_HMM_REGIME", "true").lower() in ("true", "1")
+ENABLE_MTF_SCORING = os.getenv("ENABLE_MTF_SCORING", "true").lower() in ("true", "1")
+ENABLE_QUALITY_SCORER = os.getenv("ENABLE_QUALITY_SCORER", "true").lower() in ("true", "1")
+ENABLE_META_LABELER = os.getenv("ENABLE_META_LABELER", "true").lower() in ("true", "1")
+ENABLE_VOL_TARGETING = os.getenv("ENABLE_VOL_TARGETING", "true").lower() in ("true", "1")
+ENABLE_PARTIAL_EXITS = os.getenv("ENABLE_PARTIAL_EXITS", "true").lower() in ("true", "1")
+ENABLE_ICHIMOKU_FILTER = os.getenv("ENABLE_ICHIMOKU_FILTER", "false").lower() in ("true", "1")
+ENABLE_ECON_CALENDAR = os.getenv("ENABLE_ECON_CALENDAR", "false").lower() in ("true", "1")
+ENABLE_ORDER_FLOW = os.getenv("ENABLE_ORDER_FLOW", "false").lower() in ("true", "1")
+ENABLE_ADAPTIVE_INDICATORS = os.getenv("ENABLE_ADAPTIVE_INDICATORS", "false").lower() in ("true", "1")
+ENABLE_MEAN_REVERSION = os.getenv("ENABLE_MEAN_REVERSION", "false").lower() in ("true", "1")
+ENABLE_DRAWDOWN_SCALING = os.getenv("ENABLE_DRAWDOWN_SCALING", "false").lower() in ("true", "1")
+ENABLE_KELLY_SIZING = os.getenv("ENABLE_KELLY_SIZING", "false").lower() in ("true", "1")
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM
 # ─────────────────────────────────────────────────────────────

@@ -20,6 +20,15 @@ DESK_WINDOWS = {
     "DESK6_EQUITIES": (15, 0, 20, 0),   # US hours, skip first 30min (14:30-15:00)
 }
 
+# Pair-specific session restrictions for DESK1_SCALPER
+# Block specific pairs during sessions where they historically lose
+SCALPER_PAIR_BLOCKS = {
+    "EURUSD": {"block_start": 22, "block_end": 7},   # Block Asian session
+    "GBPUSD": {"block_start": 22, "block_end": 7},   # Block Asian session
+    "USDCHF": {"block_start": 22, "block_end": 7},   # Block Asian session
+    # USDJPY and AUDUSD are ALLOWED during Asian — they have liquidity
+}
+
 # Gold mid-week confidence boost days (Mon=0, Tue=1, Wed=2, Thu=3, Fri=4)
 GOLD_BOOST_DAYS = {1, 2, 3}  # Tue, Wed, Thu
 GOLD_BOOST_MULTIPLIER = 1.2
@@ -27,6 +36,7 @@ GOLD_BOOST_MULTIPLIER = 1.2
 # Counters for logging (reset per engine lifetime)
 _filtered_count = 0
 _passed_count = 0
+_pair_filtered_count = 0
 
 
 def is_valid_trading_hour(
@@ -37,7 +47,7 @@ def is_valid_trading_hour(
 
     Returns True if trading is allowed, False if outside market hours.
     """
-    global _filtered_count, _passed_count
+    global _filtered_count, _passed_count, _pair_filtered_count
 
     if utc_now is None:
         utc_now = datetime.now(timezone.utc)
@@ -66,6 +76,23 @@ def is_valid_trading_hour(
         if symbol.upper() not in CRYPTO_SYMBOLS:
             _filtered_count += 1
             return False
+
+    # ── Pair-specific session blocks (checked BEFORE desk window) ──
+
+    if desk_id == "DESK1_SCALPER":
+        block = SCALPER_PAIR_BLOCKS.get(symbol.upper())
+        if block:
+            bs = block["block_start"]
+            be = block["block_end"]
+            # Handle midnight wraparound (e.g. 22:00-07:00)
+            if bs > be:
+                blocked = hour >= bs or hour < be
+            else:
+                blocked = bs <= hour < be
+            if blocked:
+                _pair_filtered_count += 1
+                logger.debug(f"PAIR BLOCK | {symbol} blocked on {desk_id} | hour={hour} UTC")
+                return False
 
     # ── Per-desk time-of-day windows ──
 
@@ -118,17 +145,19 @@ def get_gold_confidence_boost(utc_now: datetime = None) -> float:
 
 def get_filter_stats() -> dict:
     """Return cumulative filter statistics for logging."""
-    total = _filtered_count + _passed_count
+    total = _filtered_count + _passed_count + _pair_filtered_count
     return {
         "filtered": _filtered_count,
+        "pair_filtered": _pair_filtered_count,
         "passed": _passed_count,
         "total": total,
-        "filter_rate": round(_filtered_count / total, 3) if total > 0 else 0.0,
+        "filter_rate": round((_filtered_count + _pair_filtered_count) / total, 3) if total > 0 else 0.0,
     }
 
 
 def reset_filter_stats() -> None:
     """Reset counters (called at engine start)."""
-    global _filtered_count, _passed_count
+    global _filtered_count, _passed_count, _pair_filtered_count
     _filtered_count = 0
     _passed_count = 0
+    _pair_filtered_count = 0

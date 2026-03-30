@@ -203,6 +203,28 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
         try:
             vix_size_modifier = 1.0  # initialized early for regime/VIX adjustments
 
+            # ── 1c. Economic calendar blackout ──
+            from app.config import ENABLE_ECON_CALENDAR
+            if ENABLE_ECON_CALENDAR:
+                try:
+                    from app.services.econ_calendar import is_near_high_impact_event
+                    econ_blocked, econ_event = is_near_high_impact_event(
+                        signal.symbol_normalized, minutes_before=30, minutes_after=15,
+                    )
+                    if econ_blocked:
+                        signal.status = "SKIPPED_ECON"
+                        db.commit()
+                        logger.info(
+                            f"ECON BLOCK | {desk_id} | {signal.symbol_normalized} | {econ_event}"
+                        )
+                        results[desk_id] = {
+                            "decision": "SKIP", "approved": False,
+                            "rejection_reason": f"Economic event: {econ_event}",
+                        }
+                        continue
+                except Exception as e:
+                    logger.debug(f"Econ calendar check skipped: {e}")
+
             # ── 2. Enrich with market data ──
             signal.status = "ENRICHING"
             db.commit()
@@ -525,8 +547,9 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
             signal.claude_reasoning = _reasoning[:997] + "..." if len(_reasoning) > 1000 else _reasoning
 
             # ── 7b. Meta-labeler filter (optional) ──
+            from app.config import ENABLE_META_LABELER
             meta_result = None
-            if decision.get("decision") in ("EXECUTE", "REDUCE"):
+            if ENABLE_META_LABELER and decision.get("decision") in ("EXECUTE", "REDUCE"):
                 try:
                     from app.services.meta_labeler import MetaLabeler
                     _meta = MetaLabeler()
@@ -569,23 +592,25 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     logger.debug(f"Meta-labeler skipped: {e}")
 
             # ── 7c. Volatility targeting (optional) ──
+            from app.config import ENABLE_VOL_TARGETING
             vol_result = None
-            try:
-                from app.services.volatility_targeter import VolatilityTargeter
-                _vol = VolatilityTargeter()
-                desk_base_risk = DESKS.get(desk_id, {}).get("risk_pct", 1.0)
-                vol_result = _vol.compute_target_size(
-                    signal.symbol_normalized, desk_id, desk_base_risk, db
-                )
-                if vol_result and vol_result.get("vol_multiplier", 1.0) != 1.0:
-                    logger.info(
-                        f"VOL TARGET | {desk_id} | {signal.symbol_normalized} | "
-                        f"Realized={vol_result.get('realized_vol', '?')} "
-                        f"Target={vol_result.get('target_vol', '?')} "
-                        f"Multiplier={vol_result.get('vol_multiplier', 1.0)}"
+            if ENABLE_VOL_TARGETING:
+                try:
+                    from app.services.volatility_targeter import VolatilityTargeter
+                    _vol = VolatilityTargeter()
+                    desk_base_risk = DESKS.get(desk_id, {}).get("risk_pct", 1.0)
+                    vol_result = _vol.compute_target_size(
+                        signal.symbol_normalized, desk_id, desk_base_risk, db
                     )
-            except Exception as e:
-                logger.debug(f"Vol targeting skipped: {e}")
+                    if vol_result and vol_result.get("vol_multiplier", 1.0) != 1.0:
+                        logger.info(
+                            f"VOL TARGET | {desk_id} | {signal.symbol_normalized} | "
+                            f"Realized={vol_result.get('realized_vol', '?')} "
+                            f"Target={vol_result.get('target_vol', '?')} "
+                            f"Multiplier={vol_result.get('vol_multiplier', 1.0)}"
+                        )
+                except Exception as e:
+                    logger.debug(f"Vol targeting skipped: {e}")
 
             # ── 8. Risk flags (advisory only — does NOT block trades) ──
             risk_flags = []

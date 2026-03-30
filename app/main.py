@@ -224,6 +224,26 @@ async def lifespan(app: FastAPI):
         conn.commit()
         logger.info("ML trade log v7 columns verified (quality, features, exit tiers)")
 
+    # v7.1 columns: enhanced shadow signal features + strategy tracking
+    with engine.connect() as conn:
+        for stmt in [
+            # Feature flag tracking on ml_trade_logs
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS strategy_id VARCHAR(30)",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS drawdown_multiplier DOUBLE PRECISION",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS econ_blocked BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE ml_trade_logs ADD COLUMN IF NOT EXISTS ichimoku_aligned BOOLEAN",
+            # Enhanced shadow signal features
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS cvd_slope DOUBLE PRECISION",
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS cvd_divergence VARCHAR(20)",
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS ichimoku_cloud_pos VARCHAR(10)",
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS strategy_id VARCHAR(30)",
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS stoch_k DOUBLE PRECISION",
+            "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS bb_pct_b DOUBLE PRECISION",
+        ]:
+            conn.execute(sa_text(stmt))
+        conn.commit()
+        logger.info("v7.1 columns verified (order flow, ichimoku, strategy tracking)")
+
     # Verify DB connection
     if check_db_connection():
         logger.info("PostgreSQL connection confirmed")
@@ -249,7 +269,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Redis connection FAILED: {e} — webhook ingestor degraded")
 
-    logger.info("OniQuant v6.1.0 Signal Generator ONLINE (uvloop + orjson + Redis Streams)")
+    logger.info("OniQuant v7.1 Signal Generator ONLINE (uvloop + orjson + Redis Streams)")
     logger.info("=" * 60)
 
     # Start background report scheduler
@@ -535,6 +555,28 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Signal Engine disabled (SIGNAL_SOURCE={SIGNAL_SOURCE})")
 
+    # ── Log feature flags ──
+    from app.config import (
+        ENABLE_MARKET_HOURS_FILTER, ENABLE_HMM_REGIME, ENABLE_MTF_SCORING,
+        ENABLE_QUALITY_SCORER, ENABLE_META_LABELER, ENABLE_VOL_TARGETING,
+        ENABLE_PARTIAL_EXITS, ENABLE_ICHIMOKU_FILTER, ENABLE_ECON_CALENDAR,
+        ENABLE_ORDER_FLOW, ENABLE_ADAPTIVE_INDICATORS, ENABLE_MEAN_REVERSION,
+        ENABLE_DRAWDOWN_SCALING, ENABLE_KELLY_SIZING,
+    )
+    flags = {
+        "MH": ENABLE_MARKET_HOURS_FILTER, "HMM": ENABLE_HMM_REGIME,
+        "MTF": ENABLE_MTF_SCORING, "QS": ENABLE_QUALITY_SCORER,
+        "ML": ENABLE_META_LABELER, "VT": ENABLE_VOL_TARGETING,
+        "PE": ENABLE_PARTIAL_EXITS, "ICH": ENABLE_ICHIMOKU_FILTER,
+        "ECON": ENABLE_ECON_CALENDAR, "OF": ENABLE_ORDER_FLOW,
+        "AI": ENABLE_ADAPTIVE_INDICATORS, "MR": ENABLE_MEAN_REVERSION,
+        "DD": ENABLE_DRAWDOWN_SCALING, "KS": ENABLE_KELLY_SIZING,
+    }
+    enabled = [k for k, v in flags.items() if v]
+    disabled = [k for k, v in flags.items() if not v]
+    logger.info(f"Feature flags ENABLED: {', '.join(enabled)}")
+    logger.info(f"Feature flags DISABLED: {', '.join(disabled)}")
+
     # ── Quant Stack Scheduled Jobs ──
     try:
         from apscheduler.triggers.cron import CronTrigger
@@ -636,9 +678,30 @@ async def lifespan(app: FastAPI):
             replace_existing=True,
         )
 
+        # Economic calendar daily event log at 06:00 UTC
+        async def _log_econ_events():
+            try:
+                from app.services.econ_calendar import get_upcoming_events
+                events = get_upcoming_events(hours_ahead=24)
+                if events:
+                    names = [f"{e['name']} ({e['minutes_until']}min)" for e in events[:5]]
+                    logger.info(f"Upcoming high-impact events (24h): {', '.join(names)}")
+                else:
+                    logger.info("No high-impact economic events in next 24h")
+            except Exception as e:
+                logger.debug(f"Econ calendar log error: {e}")
+
+        _scheduler.add_job(
+            _log_econ_events,
+            trigger=CronTrigger(hour=6, minute=0, timezone="UTC"),
+            id="econ_calendar_log",
+            name="Economic Calendar Log (06:00 UTC)",
+            replace_existing=True,
+        )
+
         logger.info(
             "Quant stack jobs registered: "
-            "HMM daily | Meta-labeler weekly | Factor monitor hourly | FRED daily"
+            "HMM 4h | Meta-labeler weekly | Factor monitor hourly | FRED daily | Econ calendar daily"
         )
     except Exception as e:
         logger.error(f"Quant stack scheduler jobs failed: {e}")
@@ -668,7 +731,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OniQuant v6.1 — Signal Generator",
+    title="OniQuant v7.1 — Signal Generator",
     description="Pure signal generator: Redis Stream Ingestor + Shadow Pipeline + Telegram Alerts",
     version="6.1.0",
     lifespan=lifespan,

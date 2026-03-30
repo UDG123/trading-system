@@ -334,6 +334,52 @@ class ShadowLogger:
             "volatility_regime": enrichment.get("volatility_regime"),
         }
 
+        # ── v7.1 High-value ML features ──
+        indicators = enrichment  # enrichment dict doubles as indicator source
+
+        # Stochastic Oscillator
+        f["stoch_k"] = indicators.get("stoch_rsi_k", 50) if indicators else 50
+        f["stoch_d"] = indicators.get("stoch_rsi_d", 50) if indicators else 50
+
+        # Bollinger Band %B
+        bb_upper = indicators.get("bb_upper") if indicators else None
+        bb_lower = indicators.get("bb_lower") if indicators else None
+        if bb_upper and bb_lower and bb_upper != bb_lower:
+            bb_pct_b = (price - bb_lower) / (bb_upper - bb_lower)
+        else:
+            bb_pct_b = 0.5
+        f["bb_pct_b"] = round(bb_pct_b, 4)
+
+        # SuperTrend direction as numeric
+        f["supertrend_dir"] = indicators.get("supertrend_direction", 0) if indicators else 0
+
+        # Squeeze state (BB inside KC)
+        f["is_squeeze"] = 1.0 if (indicators and indicators.get("squeeze")) else 0.0
+
+        # ATR-to-barrier ratio (predicts timeout probability)
+        atr_val = indicators.get("atr", 0) if indicators else 0
+        if atr_val and atr_val > 0 and sl1 and price > 0:
+            sl_dist = abs(price - float(sl1))
+            atr_to_sl = sl_dist / float(atr_val) if float(atr_val) > 0 else 0
+        else:
+            atr_to_sl = 0
+        f["atr_to_sl_ratio"] = round(atr_to_sl, 4)
+
+        # Order flow features (if available from indicator_calculator)
+        f["cvd_slope"] = indicators.get("cvd_slope", 0) if indicators else 0
+        f["cvd_divergence_dist"] = 1.0 if (indicators and indicators.get("cvd_divergence") == "DISTRIBUTION") else 0.0
+        f["cvd_divergence_accum"] = 1.0 if (indicators and indicators.get("cvd_divergence") == "ACCUMULATION") else 0.0
+
+        # Ichimoku cloud position
+        f["above_cloud"] = 1.0 if (indicators and indicators.get("price_above_cloud")) else 0.0
+        f["below_cloud"] = 1.0 if (indicators and indicators.get("price_below_cloud")) else 0.0
+
+        # EMA slope (momentum direction)
+        f["ema50_slope"] = indicators.get("ema50_slope", 0) if indicators else 0
+
+        # Rolling win rate for this symbol (from enrichment if pipeline computed it)
+        f["symbol_recent_wr"] = float(enrichment.get("symbol_recent_wr", 50)) / 100 if enrichment else 0.5
+
         return f
 
     def get_unlabeled_signals(

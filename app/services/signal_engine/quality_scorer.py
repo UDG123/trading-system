@@ -59,7 +59,8 @@ class SignalQualityScorer:
 
         # 2. Volatility Regime Suitability (20 pts)
         regime = confluence.get("regime", "UNKNOWN")
-        breakdown["regime_suitability"] = self._score_regime(regime, alert_type)
+        direction = confluence.get("direction", "")
+        breakdown["regime_suitability"] = self._score_regime(regime, alert_type, direction, indicators)
 
         # 3. S/R Proximity (15 pts)
         breakdown["sr_proximity"] = self._score_sr_proximity(indicators, smc)
@@ -109,25 +110,43 @@ class SignalQualityScorer:
         return round(min(25.0, (raw - 0.3) / 0.7 * 25), 1)
 
     @staticmethod
-    def _score_regime(regime: str, alert_type: str) -> float:
-        """Volatility Regime Suitability: 20 pts max."""
+    def _score_regime(regime: str, alert_type: str, direction: str = "", indicators: Dict = None) -> float:
+        """Volatility Regime Suitability: 20 pts max. Ichimoku alignment bonus ±5."""
         is_momentum = alert_type in MOMENTUM_ALERT_TYPES
         is_mean_rev = alert_type in MEAN_REVERSION_ALERT_TYPES
 
         if regime in ("TRENDING_UP", "TRENDING_DOWN"):
             if is_momentum:
-                return 20.0  # Trend signal in trending market
+                score = 20.0
             elif is_mean_rev:
-                return 5.0   # Mean-reversion in trending (mismatch)
-            return 12.0       # Neutral signal type
+                score = 5.0
+            else:
+                score = 12.0
         elif regime == "RANGING":
             if is_mean_rev:
-                return 20.0  # Mean-reversion in ranging
+                score = 20.0
             elif is_momentum:
-                return 5.0   # Momentum in ranging (mismatch)
-            return 12.0
+                score = 5.0
+            else:
+                score = 12.0
         else:
-            return 10.0      # Unknown regime
+            score = 10.0
+
+        # Ichimoku alignment bonus/penalty
+        if indicators and direction:
+            above = indicators.get("price_above_cloud")
+            below = indicators.get("price_below_cloud")
+            if above is not None:
+                if direction == "LONG" and above:
+                    score += 5.0   # Long with price above cloud — aligned
+                elif direction == "SHORT" and below:
+                    score += 5.0   # Short with price below cloud — aligned
+                elif direction == "SHORT" and above:
+                    score -= 5.0   # Short against cloud — penalize
+                elif direction == "LONG" and below:
+                    score -= 5.0   # Long against cloud — penalize
+
+        return max(0.0, min(20.0, round(score, 1)))
 
     @staticmethod
     def _score_sr_proximity(indicators: Dict, smc: Optional[Dict]) -> float:

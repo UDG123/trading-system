@@ -161,15 +161,19 @@ class SignalEngine:
                     # Market hours pre-filter — skip symbols with NO open desk
                     # to avoid wasting a TwelveData credit on a fetch we won't use
                     from datetime import datetime, timezone as tz
+                    from app.config import ENABLE_MARKET_HOURS_FILTER
                     now_utc = datetime.now(tz.utc)
                     desks = get_desk_for_symbol(symbol)
-                    active_desks = [
-                        d for d in desks
-                        if is_valid_trading_hour(symbol, d, now_utc)
-                    ]
-                    if not active_desks:
-                        await asyncio.sleep(0.1)
-                        continue
+                    if ENABLE_MARKET_HOURS_FILTER:
+                        active_desks = [
+                            d for d in desks
+                            if is_valid_trading_hour(symbol, d, now_utc)
+                        ]
+                        if not active_desks:
+                            await asyncio.sleep(0.1)
+                            continue
+                    else:
+                        active_desks = desks
 
                     # Fetch latest candles
                     new_bars = await self.candle_manager.fetch_latest(symbol, timeframe)
@@ -183,7 +187,19 @@ class SignalEngine:
                         await asyncio.sleep(0.3)
                         continue
 
-                    indicators = self.indicator_calc.compute(df, symbol, timeframe)
+                    # Get cached regime for adaptive indicators
+                    regime_label = None
+                    from app.config import ENABLE_ADAPTIVE_INDICATORS, ENABLE_HMM_REGIME
+                    if ENABLE_ADAPTIVE_INDICATORS and ENABLE_HMM_REGIME:
+                        try:
+                            from app.services.signal_engine.regime_detector import HMMRegimeDetector
+                            _det = HMMRegimeDetector(redis_pool=self.redis)
+                            _regime = await _det.get_regime(symbol)
+                            regime_label = _regime.get("regime", "UNKNOWN") if _regime else None
+                        except Exception:
+                            pass
+
+                    indicators = self.indicator_calc.compute(df, symbol, timeframe, regime=regime_label)
                     if not indicators:
                         await asyncio.sleep(0.3)
                         continue
