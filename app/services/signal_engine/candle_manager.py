@@ -34,8 +34,13 @@ TF_TO_TABLE = {
 
 # Rolling window sizes (bars kept in memory)
 LOOKBACK_BARS = {
-    "1M": 500, "5M": 300, "15M": 200,
-    "1H": 300, "4H": 200, "D": 250, "W": 104,
+    "1M": 2000,  # ~33 hours — expanded for free data providers
+    "5M": 2000,  # ~7 days
+    "15M": 2000, # ~21 days
+    "1H": 2000,  # ~83 days
+    "4H": 500,   # ~83 days
+    "D": 500,    # ~2 years
+    "W": 104,    # ~2 years
 }
 
 
