@@ -203,6 +203,28 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
         try:
             vix_size_modifier = 1.0  # initialized early for regime/VIX adjustments
 
+            # ── 1c. Economic calendar blackout ──
+            from app.config import ENABLE_ECON_CALENDAR
+            if ENABLE_ECON_CALENDAR:
+                try:
+                    from app.services.econ_calendar import is_near_high_impact_event
+                    econ_blocked, econ_event = is_near_high_impact_event(
+                        signal.symbol_normalized, minutes_before=30, minutes_after=15,
+                    )
+                    if econ_blocked:
+                        signal.status = "SKIPPED_ECON"
+                        db.commit()
+                        logger.info(
+                            f"ECON BLOCK | {desk_id} | {signal.symbol_normalized} | {econ_event}"
+                        )
+                        results[desk_id] = {
+                            "decision": "SKIP", "approved": False,
+                            "rejection_reason": f"Economic event: {econ_event}",
+                        }
+                        continue
+                except Exception as e:
+                    logger.debug(f"Econ calendar check skipped: {e}")
+
             # ── 2. Enrich with market data ──
             signal.status = "ENRICHING"
             db.commit()

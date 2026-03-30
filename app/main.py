@@ -648,9 +648,30 @@ async def lifespan(app: FastAPI):
             replace_existing=True,
         )
 
+        # Economic calendar daily event log at 06:00 UTC
+        async def _log_econ_events():
+            try:
+                from app.services.econ_calendar import get_upcoming_events
+                events = get_upcoming_events(hours_ahead=24)
+                if events:
+                    names = [f"{e['name']} ({e['minutes_until']}min)" for e in events[:5]]
+                    logger.info(f"Upcoming high-impact events (24h): {', '.join(names)}")
+                else:
+                    logger.info("No high-impact economic events in next 24h")
+            except Exception as e:
+                logger.debug(f"Econ calendar log error: {e}")
+
+        _scheduler.add_job(
+            _log_econ_events,
+            trigger=CronTrigger(hour=6, minute=0, timezone="UTC"),
+            id="econ_calendar_log",
+            name="Economic Calendar Log (06:00 UTC)",
+            replace_existing=True,
+        )
+
         logger.info(
             "Quant stack jobs registered: "
-            "HMM daily | Meta-labeler weekly | Factor monitor hourly | FRED daily"
+            "HMM 4h | Meta-labeler weekly | Factor monitor hourly | FRED daily | Econ calendar daily"
         )
     except Exception as e:
         logger.error(f"Quant stack scheduler jobs failed: {e}")

@@ -233,6 +233,18 @@ class SignalGenerator:
                     )
                     return None
 
+        # ── Economic calendar blackout — block near high-impact events ──
+        from app.config import ENABLE_ECON_CALENDAR
+        if ENABLE_ECON_CALENDAR:
+            try:
+                from app.services.econ_calendar import is_near_high_impact_event
+                blocked, event_name = is_near_high_impact_event(symbol, minutes_before=30, minutes_after=15)
+                if blocked:
+                    logger.info(f"ECON BLOCK | {symbol} blocked — {event_name} | Desk: {desk_id}")
+                    return None
+            except Exception:
+                pass
+
         alert_type = self._classify_signal(direction, indicators, smc, confluence)
         if alert_type not in VALID_ALERT_TYPES:
             return None
