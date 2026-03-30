@@ -239,6 +239,8 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS strategy_id VARCHAR(30)",
             "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS stoch_k DOUBLE PRECISION",
             "ALTER TABLE shadow_signals ADD COLUMN IF NOT EXISTS bb_pct_b DOUBLE PRECISION",
+            # Widen tb_barrier_hit for TIMEOUT_WIN/TIMEOUT_LOSS/TIMEOUT_FLAT labels
+            "ALTER TABLE shadow_signals ALTER COLUMN tb_barrier_hit TYPE VARCHAR(20)",
         ]:
             conn.execute(sa_text(stmt))
         conn.commit()
