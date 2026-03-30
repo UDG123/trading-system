@@ -39,15 +39,21 @@ class MetaLabeler:
 
     # Enhanced feature column names matching the query order
     _FEATURE_NAMES = [
+        # Core (10)
         "consensus_score", "ml_score", "hurst_exponent",
         "rsi", "adx", "atr_pct", "rvol_multiplier",
         "hour_utc", "day_of_week", "vix_level",
-        # Enhanced features from feature_engineer (if available in feature_vector)
+        # Feature engineer (12)
         "garman_klass_vol", "parkinson_vol", "atr_ratio",
         "close_location_value", "candle_body_ratio",
         "upper_wick_ratio", "lower_wick_ratio",
         "zscore_20", "zscore_50", "roc_5", "roc_20",
         "mtf_confluence_score",
+        # v7.1 high-value features (12)
+        "stoch_k", "stoch_d", "bb_pct_b", "supertrend_dir",
+        "is_squeeze", "atr_to_sl_ratio", "cvd_slope",
+        "cvd_divergence_dist", "cvd_divergence_accum",
+        "above_cloud", "below_cloud", "ema50_slope",
     ]
 
     def train(self, db: Session) -> Dict:
@@ -119,6 +125,21 @@ class MetaLabeler:
                     float(fv.get("roc_5", 0) or 0),
                     float(fv.get("roc_20", 0) or 0),
                     float(fv.get("mtf_confluence_score", 0) or 0),
+                ])
+                # v7.1 high-value features
+                row.extend([
+                    float(fv.get("stoch_k", 50) or 50),
+                    float(fv.get("stoch_d", 50) or 50),
+                    float(fv.get("bb_pct_b", 0.5) or 0.5),
+                    float(fv.get("supertrend_dir", 0) or 0),
+                    float(fv.get("is_squeeze", 0) or 0),
+                    float(fv.get("atr_to_sl_ratio", 0) or 0),
+                    float(fv.get("cvd_slope", 0) or 0),
+                    float(fv.get("cvd_divergence_dist", 0) or 0),
+                    float(fv.get("cvd_divergence_accum", 0) or 0),
+                    float(fv.get("above_cloud", 0) or 0),
+                    float(fv.get("below_cloud", 0) or 0),
+                    float(fv.get("ema50_slope", 0) or 0),
                 ])
 
                 features.append(row)
@@ -252,6 +273,21 @@ class MetaLabeler:
                 float(features.get("roc_5", 0)),
                 float(features.get("roc_20", 0)),
                 float(features.get("mtf_confluence_score", 0)),
+            ])
+            # v7.1 high-value features
+            feature_vec.extend([
+                float(features.get("stoch_k", 50)),
+                float(features.get("stoch_d", 50)),
+                float(features.get("bb_pct_b", 0.5)),
+                float(features.get("supertrend_dir", 0)),
+                float(features.get("is_squeeze", 0)),
+                float(features.get("atr_to_sl_ratio", 0)),
+                float(features.get("cvd_slope", 0)),
+                float(features.get("cvd_divergence_dist", 0)),
+                float(features.get("cvd_divergence_accum", 0)),
+                float(features.get("above_cloud", 0)),
+                float(features.get("below_cloud", 0)),
+                float(features.get("ema50_slope", 0)),
             ])
 
             # Trim to model's expected feature count (handles old models with fewer features)
