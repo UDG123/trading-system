@@ -193,6 +193,22 @@ async def generate_daily_digest(db_session_factory) -> str:
         except Exception:
             pass
 
+        # ── Strategy breakdown ──
+        strategy_rows = []
+        try:
+            strategy_rows = db.execute(sa_text("""
+                SELECT
+                    COALESCE(strategy_id, 'trend_continuation') AS strategy,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE outcome = 'WIN') AS wins,
+                    COALESCE(SUM(pnl_dollars), 0) AS pnl
+                FROM ml_trade_logs
+                WHERE DATE(created_at) = :today AND outcome IS NOT NULL
+                GROUP BY COALESCE(strategy_id, 'trend_continuation')
+            """), {"today": today_str}).fetchall()
+        except Exception:
+            pass
+
         # ── Build desk lines ──
         desk_lines = []
         desk_emoji = {
@@ -250,6 +266,19 @@ async def generate_daily_digest(db_session_factory) -> str:
             msg += "│  No completed trades today\n"
         msg += f"└─────────────────────\n\n"
 
+        # Strategy mix section
+        if strategy_rows:
+            msg += "┌─ STRATEGY MIX\n"
+            for sr in strategy_rows:
+                strat = sr[0]
+                s_total = int(sr[1])
+                s_wins = int(sr[2])
+                s_pnl = float(sr[3])
+                s_wr = (s_wins / s_total * 100) if s_total > 0 else 0
+                s_icon = "✅" if s_pnl >= 0 else "❌"
+                msg += f"│  {strat}: {s_total}t | {s_wr:.0f}% WR | {s_icon} ${s_pnl:+,.0f}\n"
+            msg += "└─────────────────────\n\n"
+
         # Signal quality section
         msg += (
             f"📈 Signal Quality: {emitted}/{total_candidates} "
@@ -284,9 +313,26 @@ async def generate_daily_digest(db_session_factory) -> str:
                 f"{f', {t0} SL pre-tier' if t0 > 0 else ''}\n"
             )
 
+        # Feature flag status for footer
+        try:
+            from app.config import (
+                ENABLE_ICHIMOKU_FILTER, ENABLE_ECON_CALENDAR, ENABLE_ORDER_FLOW,
+                ENABLE_ADAPTIVE_INDICATORS, ENABLE_MEAN_REVERSION, ENABLE_DRAWDOWN_SCALING,
+            )
+            new_flags = []
+            if ENABLE_ICHIMOKU_FILTER: new_flags.append("ICH")
+            if ENABLE_ECON_CALENDAR: new_flags.append("ECON")
+            if ENABLE_ORDER_FLOW: new_flags.append("OF")
+            if ENABLE_ADAPTIVE_INDICATORS: new_flags.append("AI")
+            if ENABLE_MEAN_REVERSION: new_flags.append("MR")
+            if ENABLE_DRAWDOWN_SCALING: new_flags.append("DD")
+            flags_str = " | ".join(new_flags) if new_flags else "none"
+        except Exception:
+            flags_str = "?"
+
         msg += (
             f"\n"
-            f"  🤖 OniQuant v7.0\n"
+            f"  🤖 OniQuant v7.1 | Flags: {flags_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
 

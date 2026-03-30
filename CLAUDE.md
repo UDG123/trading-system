@@ -1,4 +1,4 @@
-# CLAUDE.md — OniQuant v7.0 System Reference
+# CLAUDE.md — OniQuant v7.1 System Reference
 
 ## What This Is
 
