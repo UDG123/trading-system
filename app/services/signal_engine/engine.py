@@ -187,7 +187,19 @@ class SignalEngine:
                         await asyncio.sleep(0.3)
                         continue
 
-                    indicators = self.indicator_calc.compute(df, symbol, timeframe)
+                    # Get cached regime for adaptive indicators
+                    regime_label = None
+                    from app.config import ENABLE_ADAPTIVE_INDICATORS, ENABLE_HMM_REGIME
+                    if ENABLE_ADAPTIVE_INDICATORS and ENABLE_HMM_REGIME:
+                        try:
+                            from app.services.signal_engine.regime_detector import HMMRegimeDetector
+                            _det = HMMRegimeDetector(redis_pool=self.redis)
+                            _regime = await _det.get_regime(symbol)
+                            regime_label = _regime.get("regime", "UNKNOWN") if _regime else None
+                        except Exception:
+                            pass
+
+                    indicators = self.indicator_calc.compute(df, symbol, timeframe, regime=regime_label)
                     if not indicators:
                         await asyncio.sleep(0.3)
                         continue

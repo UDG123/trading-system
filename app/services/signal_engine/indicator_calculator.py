@@ -92,9 +92,20 @@ def _safe_last(series: Optional[pd.Series]) -> Optional[float]:
 class IndicatorCalculator:
     """Computes technical indicators on OHLCV DataFrames."""
 
-    def compute(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Optional[Dict]:
+    # Regime-adaptive indicator parameters
+    REGIME_PARAMS = {
+        "TRENDING_UP":   {"rsi_period": 10, "rsi_ob": 75, "rsi_os": 25, "ema_fast": 12, "ema_slow": 26, "adx_period": 14},
+        "TRENDING_DOWN": {"rsi_period": 10, "rsi_ob": 75, "rsi_os": 25, "ema_fast": 12, "ema_slow": 26, "adx_period": 14},
+        "RANGING":       {"rsi_period": 21, "rsi_ob": 65, "rsi_os": 35, "ema_fast": 21, "ema_slow": 50, "adx_period": 20},
+        "VOLATILE":      {"rsi_period": 7,  "rsi_ob": 80, "rsi_os": 20, "ema_fast": 8,  "ema_slow": 21, "adx_period": 10},
+        "UNKNOWN":       {"rsi_period": 14, "rsi_ob": 70, "rsi_os": 30, "ema_fast": 21, "ema_slow": 50, "adx_period": 14},
+    }
+
+    def compute(self, df: pd.DataFrame, symbol: str, timeframe: str, regime: str = None) -> Optional[Dict]:
         """
         Compute all indicators for a symbol-timeframe pair.
+        When ENABLE_ADAPTIVE_INDICATORS is True and regime is provided,
+        uses regime-specific parameters instead of fixed defaults.
         Returns flat dict with all indicator values, or None if insufficient data.
         """
         if df is None or len(df) < MIN_BARS:
@@ -108,6 +119,20 @@ class IndicatorCalculator:
             logger.error("ta library not installed")
             return None
 
+        # Resolve regime-adaptive parameters
+        from app.config import ENABLE_ADAPTIVE_INDICATORS
+        if ENABLE_ADAPTIVE_INDICATORS and regime:
+            params = self.REGIME_PARAMS.get(regime, self.REGIME_PARAMS["UNKNOWN"])
+        else:
+            params = self.REGIME_PARAMS["UNKNOWN"]
+
+        rsi_period = params["rsi_period"]
+        rsi_ob_threshold = params["rsi_ob"]
+        rsi_os_threshold = params["rsi_os"]
+        ema_fast = params["ema_fast"]
+        ema_slow = params["ema_slow"]
+        adx_period = params["adx_period"]
+
         try:
             close = df["close"].astype(float)
             high = df["high"].astype(float)
@@ -116,10 +141,11 @@ class IndicatorCalculator:
             latest = close.iloc[-1]
 
             result: Dict = {"price": latest}
+            result["indicator_params"] = {"rsi_period": rsi_period, "ema_fast": ema_fast, "ema_slow": ema_slow, "adx_period": adx_period, "regime": regime or "DEFAULT"}
 
-            # ── EMAs ──
-            ema21_series = EMAIndicator(close=close, window=21).ema_indicator()
-            ema50_series = EMAIndicator(close=close, window=50).ema_indicator()
+            # ── EMAs (fast/slow adapt to regime) ──
+            ema21_series = EMAIndicator(close=close, window=ema_fast).ema_indicator()
+            ema50_series = EMAIndicator(close=close, window=ema_slow).ema_indicator()
             ema200_series = EMAIndicator(close=close, window=200).ema_indicator() if len(close) >= 200 else None
 
             result["ema21"] = _safe_last(ema21_series)
@@ -166,12 +192,12 @@ class IndicatorCalculator:
             else:
                 result["supertrend_flip"] = False
 
-            # ── RSI ──
-            rsi_series = RSIIndicator(close=close, window=14).rsi()
+            # ── RSI (period adapts to regime) ──
+            rsi_series = RSIIndicator(close=close, window=rsi_period).rsi()
             rsi_val = _safe_last(rsi_series)
             result["rsi"] = rsi_val if rsi_val is not None else 50.0
-            result["rsi_ob"] = result["rsi"] > 70
-            result["rsi_os"] = result["rsi"] < 30
+            result["rsi_ob"] = result["rsi"] > rsi_ob_threshold
+            result["rsi_os"] = result["rsi"] < rsi_os_threshold
 
             # ── Stochastic RSI ──
             stoch_rsi = StochRSIIndicator(close=close, window=14, smooth1=3, smooth2=3)
@@ -180,8 +206,8 @@ class IndicatorCalculator:
             result["stoch_rsi_k"] = stoch_k if stoch_k is not None else 50.0
             result["stoch_rsi_d"] = stoch_d if stoch_d is not None else 50.0
 
-            # ── ADX ──
-            adx_ind = ADXIndicator(high=high, low=low, close=close, window=14)
+            # ── ADX (period adapts to regime) ──
+            adx_ind = ADXIndicator(high=high, low=low, close=close, window=adx_period)
             adx_val = _safe_last(adx_ind.adx())
             result["adx"] = adx_val if adx_val is not None else 20.0
             result["adx_trending"] = result["adx"] > 25
