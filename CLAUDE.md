@@ -344,3 +344,20 @@ Run automatically on startup via `main.py` lifespan. The `migrations/` directory
 | `004_pending_entry_engine.sql` | pending_signals table |
 | `005_signal_engine_candles.sql` | OHLCV tables (5m through 1w) |
 | `006_quant_stack_v7.sql` | HMM, meta-label, vol target, HAR-RV columns |
+
+## Local Setup Quickstart
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Run local dependencies (Postgres + Redis), then start services:
+
+```bash
+uvicorn app.main:app --reload
+python run_worker.py
+pytest -q tests/test_signal_flow_smoke.py
+```

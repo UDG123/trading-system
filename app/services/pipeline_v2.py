@@ -72,6 +72,12 @@ class PipelineV2:
         if signal.status == "REJECTED":
             return {"status": "skipped", "message": "Already rejected"}
 
+        raw_payload = {}
+        try:
+            raw_payload = json.loads(signal.raw_payload) if signal.raw_payload else {}
+        except Exception:
+            raw_payload = {}
+
         signal_data = {
             "symbol": signal.symbol_normalized,
             "timeframe": signal.timeframe,
@@ -82,7 +88,15 @@ class PipelineV2:
             "sl1": signal.sl1, "sl2": signal.sl2,
             "smart_trail": signal.smart_trail,
             "webhook_latency_ms": webhook_latency_ms,
-            "desk_mode": getattr(signal, "metadata", None) if False else None,
+            "desk_mode": raw_payload.get("desk_mode"),
+            "strategy_mode": raw_payload.get("strategy_mode"),
+            "mode_reason": raw_payload.get("mode_reason"),
+            "quality_hints": raw_payload.get("quality_hints", []),
+            "cross_desk_bias": raw_payload.get("cross_desk_bias"),
+            "bias_alignment": raw_payload.get("bias_alignment"),
+            "bias_action": raw_payload.get("bias_action"),
+            "bias_size_mult": float(raw_payload.get("bias_size_mult", 1.0) or 1.0),
+            "blocked_by_bias": bool(raw_payload.get("blocked_by_bias", False)),
         }
 
         desks = signal.desks_matched or []
@@ -109,6 +123,10 @@ class PipelineV2:
                 reject = self._step1_validate(db, signal, signal_data, desk_id)
                 if reject:
                     results[desk_id] = reject
+                    continue
+                if signal_data.get("bias_action") == "BLOCKED" or signal_data.get("blocked_by_bias"):
+                    reason = f"Bias blocked ({signal_data.get('bias_alignment', 'COUNTER')})"
+                    results[desk_id] = {"decision": "SKIP", "approved": False, "reason": reason}
                     continue
 
                 # ═══ STEP 2: SCORE (weighted quality 0-100) ═══
@@ -162,7 +180,9 @@ class PipelineV2:
                 # ═══ STEP 3: SIZE (quality → position size) ═══
                 desk = DESKS.get(desk_id, {})
                 risk_pct = desk.get("risk_pct", 1.0)
-                size_mult = quality["size_multiplier"]
+                quality_size_multiplier = float(quality["size_multiplier"])
+                bias_size_multiplier = float(signal_data.get("bias_size_mult", 1.0) or 1.0)
+                size_mult = max(0.10, min(1.25, quality_size_multiplier * bias_size_multiplier))
                 effective_risk = round(risk_pct * size_mult, 4)
                 risk_dollars = CAPITAL_PER_ACCOUNT * (effective_risk / 100)
 
@@ -236,6 +256,10 @@ class PipelineV2:
                     "size_multiplier": size_mult,
                     "regime": quality.get("regime", ""),
                     "desk_mode": signal_data.get("desk_mode"),
+                    "strategy_mode": signal_data.get("strategy_mode"),
+                    "mode_reason": signal_data.get("mode_reason"),
+                    "bias_alignment": signal_data.get("bias_alignment"),
+                    "bias_action": signal_data.get("bias_action"),
                 }
                 decision_stub = {
                     "decision": "EXECUTE",

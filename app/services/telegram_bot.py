@@ -189,6 +189,11 @@ class TelegramBot:
         trend = trade_params.get("trend", "UNKNOWN")
         rsi_val = trade_params.get("rsi")
         exec_time = trade_params.get("exec_time_s", 0)
+        desk_mode = trade_params.get("desk_mode", "-")
+        strategy_mode = trade_params.get("strategy_mode", "-")
+        bias_alignment = trade_params.get("bias_alignment", "NEUTRAL")
+        bias_action = trade_params.get("bias_action", "NONE")
+        mode_reason = trade_params.get("mode_reason", "-")
 
         dl = DESK_LABEL.get(desk, desk)
         de = DESK_EMOJI.get(desk, "\U0001f4ca")
@@ -258,6 +263,9 @@ class TelegramBot:
             f"{rr_line}{rsi_line}"
             f"{BAR}\n"
             f"{sb}  {score}/10  {sl_lbl}\n"
+            f"⚙️ {desk_mode} · {strategy_mode}\n"
+            f"🧭 Bias: {bias_alignment} ({bias_action})\n"
+            f"📝 {str(mode_reason)[:140]}\n"
             f"{proj}\n\n"
             f"{reasoning}\n\n"
             f"{ex}{dl}{gold}  \u00b7  {now}\n"
