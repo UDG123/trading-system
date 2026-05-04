@@ -22,6 +22,7 @@ from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.strategy_stacks import run_stacks, detect_regime_adx_atr
 from app.services.signal_engine.market_hours_filter import is_valid_trading_hour
 from app.services.signal_engine.candle_manager import CandleManager
+from app.services.signal_engine.gold_modes import scan_gold_modes
 
 logger = logging.getLogger("TradingSystem.SignalEngine.DeskScanner")
 
@@ -84,6 +85,14 @@ class DeskScanner:
             # Detect regime from ADX/ATR if not cached
             if not regime:
                 regime = detect_regime_adx_atr(indicators)
+
+            # Gold mode routing
+            if desk_id == "DESK4_GOLD":
+                gold = scan_gold_modes(symbol=symbol, regime=regime or "TRANSITIONAL", spread_ok=True)
+                for g in gold:
+                    g.update({"symbol": symbol, "timeframe": entry_tf, "direction": "LONG", "alert_type": "bullish_confirmation", "confidence": 0.6, "price": float(df["close"].iloc[-1]), "atr": float(indicators.get("atr", 0) or 0), "regime": regime or "TRANSITIONAL", "stack_id": "GOLD_MODE"})
+                    candidates.append(g)
+                continue
 
             # Run applicable strategy stacks
             stack_results = run_stacks(df, indicators, symbol, regime)
@@ -169,6 +178,10 @@ class DeskScanner:
             "quality_size_mult": 1.0 if candidate.get("confidence", 0) > 0.7 else 0.5,
             "regime": candidate.get("regime", "UNKNOWN"),
             "stack_id": candidate.get("stack_id", "?"),
+            "desk_mode": candidate.get("desk_mode"),
+            "strategy_mode": candidate.get("strategy_mode"),
+            "mode_reason": candidate.get("mode_reason"),
+            "quality_hints": candidate.get("quality_hints", []),
         }
 
     @staticmethod
