@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List
 
+import os
 from app.config import DESKS, get_desk_for_symbol, get_atr_settings
 from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.strategy_stacks import run_stacks, detect_regime_adx_atr
@@ -117,7 +118,7 @@ class DeskScanner:
                 GLOBAL_CROSS_DESK_BIAS.update_from_candidate(result)
                 result = GLOBAL_CROSS_DESK_BIAS.apply(result)
 
-                if result.get("blocked_by_bias"):
+                if result.get("blocked_by_bias") and os.getenv("ENABLE_HARD_BIAS_FILTER", "false").lower() in {"1","true","yes","on"}:
                     logger.info(
                         "BIAS BLOCK | %s %s %s counter to %s",
                         desk_id, symbol, result.get("direction"), result.get("cross_desk_bias"),
@@ -196,7 +197,8 @@ class DeskScanner:
             "cross_desk_bias": candidate.get("cross_desk_bias"),
             "bias_alignment": candidate.get("bias_alignment"),
             "bias_action": candidate.get("bias_action"),
-            "bias_size_mult": candidate.get("bias_size_mult"),
+            "bias_size_mult": candidate.get("bias_size_mult", 1.0),
+            "blocked_by_bias": bool(candidate.get("blocked_by_bias", False)),
         }
 
     @staticmethod

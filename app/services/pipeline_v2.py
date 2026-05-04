@@ -88,8 +88,9 @@ class PipelineV2:
             "sl1": signal.sl1, "sl2": signal.sl2,
             "smart_trail": signal.smart_trail,
             "webhook_latency_ms": webhook_latency_ms,
-            "desk_mode": raw_payload.get("desk_mode"),
-            "strategy_mode": raw_payload.get("strategy_mode"),
+            "desk_mode": raw_payload.get("desk_mode", "STANDARD"),
+            "desk_role": raw_payload.get("desk_role", "EXECUTION"),
+            "strategy_mode": raw_payload.get("strategy_mode", "DEFAULT"),
             "mode_reason": raw_payload.get("mode_reason"),
             "quality_hints": raw_payload.get("quality_hints", []),
             "cross_desk_bias": raw_payload.get("cross_desk_bias"),
@@ -97,6 +98,9 @@ class PipelineV2:
             "bias_action": raw_payload.get("bias_action"),
             "bias_size_mult": float(raw_payload.get("bias_size_mult", 1.0) or 1.0),
             "blocked_by_bias": bool(raw_payload.get("blocked_by_bias", False)),
+            "stack_id": raw_payload.get("stack_id", "unknown"),
+            "regime": raw_payload.get("regime", "UNKNOWN"),
+            "strategy_id": raw_payload.get("strategy_id", "unknown"),
         }
 
         desks = signal.desks_matched or []
@@ -126,7 +130,11 @@ class PipelineV2:
                     continue
                 if signal_data.get("bias_action") == "BLOCKED" or signal_data.get("blocked_by_bias"):
                     reason = f"Bias blocked ({signal_data.get('bias_alignment', 'COUNTER')})"
-                    results[desk_id] = {"decision": "SKIP", "approved": False, "reason": reason}
+                    signal_data["rejection_reason"] = reason
+                    signal_data["blocked_layer"] = "PIPELINE_V2_BIAS"
+                    signal_data["would_have_simulated"] = True
+                    logger.info("SKIP %s %s %s", desk_id, signal_data.get("symbol"), reason)
+                    results[desk_id] = {"decision": "SKIP", "approved": False, "reason": reason, "would_have_simulated": True}
                     continue
 
                 # ═══ STEP 2: SCORE (weighted quality 0-100) ═══
@@ -256,10 +264,14 @@ class PipelineV2:
                     "size_multiplier": size_mult,
                     "regime": quality.get("regime", ""),
                     "desk_mode": signal_data.get("desk_mode"),
+                    "desk_role": signal_data.get("desk_role"),
                     "strategy_mode": signal_data.get("strategy_mode"),
                     "mode_reason": signal_data.get("mode_reason"),
                     "bias_alignment": signal_data.get("bias_alignment"),
                     "bias_action": signal_data.get("bias_action"),
+                    "bias_size_mult": bias_size_multiplier,
+                    "stack_id": signal_data.get("stack_id"),
+                    "strategy_id": signal_data.get("strategy_id"),
                 }
                 decision_stub = {
                     "decision": "EXECUTE",
