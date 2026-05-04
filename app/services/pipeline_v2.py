@@ -82,6 +82,7 @@ class PipelineV2:
             "sl1": signal.sl1, "sl2": signal.sl2,
             "smart_trail": signal.smart_trail,
             "webhook_latency_ms": webhook_latency_ms,
+            "desk_mode": getattr(signal, "metadata", None) if False else None,
         }
 
         desks = signal.desks_matched or []
@@ -234,6 +235,7 @@ class PipelineV2:
                     "quality_tier": quality["tier"],
                     "size_multiplier": size_mult,
                     "regime": quality.get("regime", ""),
+                    "desk_mode": signal_data.get("desk_mode"),
                 }
                 decision_stub = {
                     "decision": "EXECUTE",
