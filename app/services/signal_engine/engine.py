@@ -31,21 +31,28 @@ STREAM_KEY = "oniquant_alerts"
 ENGINE_DAILY_CREDIT_BUDGET = int(os.getenv("ENGINE_DAILY_CREDITS", "500"))
 ENGINE_PER_MINUTE_LIMIT = 50  # Leave 5/min headroom for enrichment
 
+# TwelveData REST polling — restricted to symbols NOT covered by free providers.
+# Crypto → Kraken WS, FX+Metals → OANDA stream, Equities → Alpaca WS.
+# Only NAS100, US30, WTIUSD remain on TwelveData (indices/commodities with no free WS).
+TD_ONLY_SYMBOLS = {"NAS100", "US30", "WTIUSD"}
+
 # Polling intervals per timeframe (seconds)
 # Staggered to spread API load
 POLLING_SCHEDULE = {
-    "1M":  {"interval": 65,    "symbols": "DESK1_SCALPER"},
-    "5M":  {"interval": 305,   "symbols": "DESK1_SCALPER,DESK4_GOLD"},
-    "15M": {"interval": 905,   "symbols": "DESK2_INTRADAY,DESK4_GOLD"},
-    "1H":  {"interval": 305,   "symbols": "ALL"},
-    "4H":  {"interval": 905,   "symbols": "DESK3_SWING,DESK5_ALTS,DESK6_EQUITIES"},
-    "D":   {"interval": 3600,  "symbols": "ALL"},
-    "W":   {"interval": 14400, "symbols": "DESK3_SWING"},
+    "1M":  {"interval": 65,    "symbols": "TD_ONLY"},
+    "5M":  {"interval": 305,   "symbols": "TD_ONLY"},
+    "15M": {"interval": 905,   "symbols": "TD_ONLY"},
+    "1H":  {"interval": 305,   "symbols": "TD_ONLY"},
+    "4H":  {"interval": 905,   "symbols": "TD_ONLY"},
+    "D":   {"interval": 3600,  "symbols": "TD_ONLY"},
+    "W":   {"interval": 14400, "symbols": "TD_ONLY"},
 }
 
 
 def _resolve_symbols(desk_spec: str) -> List[str]:
-    """Resolve desk spec like 'DESK1_SCALPER,DESK4_GOLD' or 'ALL' to symbol list."""
+    """Resolve desk spec like 'DESK1_SCALPER,DESK4_GOLD' or 'ALL' or 'TD_ONLY' to symbol list."""
+    if desk_spec == "TD_ONLY":
+        return sorted(TD_ONLY_SYMBOLS)
     if desk_spec == "ALL":
         return CandleManager.get_all_symbols()
 
@@ -97,7 +104,56 @@ class SignalEngine:
             )
             await self.candle_manager.initial_backfill(all_symbols, all_tfs)
 
-            # Phase 2: Start polling loops per timeframe
+            # Phase 2: Start free data provider streams
+            try:
+                from app.services.data_providers.kraken_ws import KrakenOHLCStream
+                kraken = KrakenOHLCStream(self._db_factory)
+                self._poll_tasks.append(
+                    asyncio.create_task(kraken.run(), name="kraken_ws")
+                )
+                logger.info("Kraken WS stream started (5 crypto pairs)")
+            except Exception as e:
+                logger.debug(f"Kraken WS start failed: {e}")
+
+            try:
+                from app.services.data_providers.oanda_stream import OANDAStream
+                oanda = OANDAStream(self._db_factory)
+                self._poll_tasks.append(
+                    asyncio.create_task(oanda.run(), name="oanda_stream")
+                )
+                logger.info("OANDA stream started (16 FX+metals)")
+            except Exception as e:
+                logger.debug(f"OANDA stream start failed: {e}")
+
+            try:
+                from app.services.data_providers.alpaca_ws import AlpacaBarStream
+                alpaca = AlpacaBarStream(self._db_factory)
+                self._poll_tasks.append(
+                    asyncio.create_task(alpaca.run(), name="alpaca_ws")
+                )
+                logger.info("Alpaca WS stream started (9 equities)")
+            except Exception as e:
+                logger.debug(f"Alpaca WS start failed: {e}")
+
+            # Phase 2b: OHLCV resampler (derives 5m/15m/1H/4H/D from 1m every 5 min)
+            async def _resample_loop():
+                while self._running:
+                    try:
+                        from app.services.data_providers.ohlcv_resampler import resample_all_symbols
+                        db = self._db_factory()
+                        try:
+                            resample_all_symbols(db, all_symbols, hours_back=1)
+                        finally:
+                            db.close()
+                    except Exception as e:
+                        logger.debug(f"Resample error: {e}")
+                    await asyncio.sleep(300)  # Every 5 minutes
+
+            self._poll_tasks.append(
+                asyncio.create_task(_resample_loop(), name="ohlcv_resampler")
+            )
+
+            # Phase 3: Start TwelveData polling (NAS100, US30, WTIUSD only)
             for tf, config in POLLING_SCHEDULE.items():
                 symbols = _resolve_symbols(config["symbols"])
                 interval = config["interval"]
@@ -107,10 +163,28 @@ class SignalEngine:
                 )
                 self._poll_tasks.append(task)
 
+            # Phase 4: Desk scanner loops (strategy stack evaluation)
+            from app.services.signal_engine.desk_scanner import DeskScanner, SCAN_INTERVALS
+            scanner = DeskScanner(self.candle_manager)
+
+            for desk_id, interval_sec in SCAN_INTERVALS.items():
+                task = asyncio.create_task(
+                    self._desk_scan_loop(scanner, desk_id, interval_sec),
+                    name=f"scan_{desk_id}",
+                )
+                self._poll_tasks.append(task)
+
+            logger.info(
+                f"Desk scanners started: "
+                + ", ".join(f"{d}@{s}s" for d, s in SCAN_INTERVALS.items())
+            )
+
+            td_count = len(TD_ONLY_SYMBOLS)
+            free_count = len(all_symbols) - td_count
             logger.info(
                 f"Signal Engine ONLINE | {len(all_symbols)} symbols | "
-                f"{len(POLLING_SCHEDULE)} timeframe loops | "
-                f"Budget: {ENGINE_DAILY_CREDIT_BUDGET} credits/day"
+                f"Free streams: {free_count} | TwelveData: {td_count} | "
+                f"Budget: {ENGINE_DAILY_CREDIT_BUDGET} credits/day (saving ~700+)"
             )
 
             # Wait for all tasks (they run forever until cancelled)
@@ -232,6 +306,32 @@ class SignalEngine:
             remaining = max(0, interval_seconds - elapsed)
             if remaining > 0:
                 await asyncio.sleep(remaining)
+
+    async def _desk_scan_loop(
+        self, scanner, desk_id: str, interval_seconds: int,
+    ) -> None:
+        """Run strategy stack scans for a desk on a fixed interval."""
+        from app.services.signal_engine.desk_scanner import DeskScanner
+
+        # Stagger start by desk order
+        desk_order = list(DESKS.keys())
+        stagger = desk_order.index(desk_id) * 3 if desk_id in desk_order else 0
+        await asyncio.sleep(stagger + 10)  # Let data streams warm up first
+
+        logger.info(f"Desk scan loop started | {desk_id} | every {interval_seconds}s")
+
+        while self._running:
+            try:
+                candidates = scanner.scan_desk(desk_id)
+
+                for candidate in candidates:
+                    payload = DeskScanner.build_signal_payload(candidate)
+                    if not await self.dedup.is_duplicate(payload):
+                        await self._emit_signal(payload)
+            except Exception as e:
+                logger.debug(f"Desk scan error for {desk_id}: {e}")
+
+            await asyncio.sleep(interval_seconds)
 
     async def _emit_signal(self, signal: Dict) -> None:
         """Push signal to Redis Stream in the format worker expects."""

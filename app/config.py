@@ -34,6 +34,10 @@ BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/spot"
 BYBIT_WS_ENABLED = os.getenv("BYBIT_WS_ENABLED", "true").lower() in ("true", "1", "yes")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+OANDA_API_KEY = os.getenv("OANDA_API_KEY", "")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 
 # Signal source: TV_ONLY | PYTHON_ONLY | BOTH (shadow/validation mode)
 SIGNAL_SOURCE = os.getenv("SIGNAL_SOURCE", "BOTH")
@@ -43,6 +47,9 @@ MTF_SCORING = os.getenv("MTF_SCORING", "WEIGHTED")
 
 # Signal quality score threshold (0-100). Signals below this are skipped.
 QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "65"))
+
+# Pipeline version: "v1" (17-step with CTO gate) or "v2" (5-step streamlined)
+PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v2")
 
 # ── v7 Feature Flags ──
 ENABLE_MARKET_HOURS_FILTER = os.getenv("ENABLE_MARKET_HOURS_FILTER", "true").lower() in ("true", "1")
