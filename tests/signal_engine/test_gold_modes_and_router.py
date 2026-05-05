@@ -4,7 +4,7 @@ from app.services.signal_engine.regime_stack_router import route_stacks
 
 def test_gold_modes_xauusd_only():
     assert scan_gold_modes("EURUSD", "TRENDING") == []
-    out = scan_gold_modes("XAUUSD", "TRENDING", spread_ok=True)
+    out = scan_gold_modes("XAUUSD", "TRENDING", spread_ok=True, timeframe_state={"1M": True, "15M": True, "1H": True, "4H": True, "D": True})
     modes = {o["desk_mode"] for o in out}
     assert {"GOLD_SCALP", "GOLD_INTRADAY", "GOLD_SWING"}.issubset(modes)
 
