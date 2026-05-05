@@ -213,3 +213,13 @@ def calculate_lot_size(equity: float, risk_pct: float, stop_pips: float, symbol:
 
 def get_hurst_thresholds(symbol: str) -> dict:
     return {"trend": 0.52, "chop": 0.45}
+
+
+SIGNAL_DEBUG_MODE = _bool("SIGNAL_DEBUG_MODE", False)
+QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "65"))
+MIN_CONFLUENCE_SCORE = float(os.getenv("MIN_CONFLUENCE_SCORE", "6.5"))
+MIN_TIMEFRAME_BARS = int(os.getenv("MIN_TIMEFRAME_BARS", "50"))
+ALLOW_WEAK_TEST_SIGNALS = _bool("ALLOW_WEAK_TEST_SIGNALS", False)
+SIMULATION_LATENCY_MS = int(os.getenv("SIMULATION_LATENCY_MS", "100"))
+SIMULATION_SLIPPAGE_BPS = float(os.getenv("SIMULATION_SLIPPAGE_BPS", "1.0"))
+SIMULATION_ASSUME_SL_FIRST_ON_SAME_BAR = _bool("SIMULATION_ASSUME_SL_FIRST_ON_SAME_BAR", True)
