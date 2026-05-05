@@ -47,9 +47,15 @@ LOOKBACK_BARS = {
 class CandleManager:
     """Manages OHLCV data for signal generation."""
 
-    def __init__(self, db_session_factory, rate_limiter: RateLimiter):
+    def __init__(self, db_session_factory=None, rate_limiter: RateLimiter = None):
+        if db_session_factory is None:
+            try:
+                from app.database import SessionLocal
+                db_session_factory = SessionLocal
+            except Exception:
+                db_session_factory = lambda: None
         self._db_factory = db_session_factory
-        self._rate_limiter = rate_limiter
+        self._rate_limiter = rate_limiter or RateLimiter()
         self._client = httpx.AsyncClient(timeout=15.0)
         self._api_key: Optional[str] = None
 
@@ -80,6 +86,51 @@ class CandleManager:
             if sym == symbol and len(df) > 0:
                 result[tf] = df
         return result
+
+    def update_dataframe(self, symbol: str, timeframe: str, candles: List[Dict]) -> int:
+        """Load provider-normalized candles into the in-memory DataFrame cache.
+
+        This intentionally avoids requiring database writes so the internal
+        scanner can run from live/historical providers, including mock data,
+        even when PostgreSQL is unavailable.
+        """
+        if not candles:
+            return 0
+        normalized = []
+        for candle in candles:
+            try:
+                normalized.append({
+                    "time": candle["time"],
+                    "open": float(candle["open"]),
+                    "high": float(candle["high"]),
+                    "low": float(candle["low"]),
+                    "close": float(candle["close"]),
+                    "volume": None if candle.get("volume") is None else float(candle.get("volume") or 0),
+                    "provider": candle.get("provider"),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not normalized:
+            return 0
+        new_df = pd.DataFrame(normalized)
+        new_df["time"] = pd.to_datetime(new_df["time"], utc=True)
+        new_df = new_df.sort_values("time").drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
+        for col in ["open", "high", "low", "close", "volume"]:
+            new_df[col] = pd.to_numeric(new_df[col], errors="coerce")
+
+        key = (symbol, timeframe)
+        existing = self._frames.get(key)
+        if existing is not None and len(existing) > 0:
+            combined = pd.concat([existing, new_df], ignore_index=True)
+            combined = combined.drop_duplicates(subset=["time"], keep="last")
+            combined = combined.sort_values("time").reset_index(drop=True)
+        else:
+            combined = new_df
+        max_bars = LOOKBACK_BARS.get(timeframe, 300)
+        self._frames[key] = combined.tail(max_bars).reset_index(drop=True)
+        return len(new_df)
+
+    load_candles = update_dataframe
 
     async def initial_backfill(self, symbols: List[str], timeframes: List[str]) -> None:
         """Load historical data from DB into memory for all symbol-TF pairs."""
