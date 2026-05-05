@@ -238,6 +238,11 @@ def scan_gold_modes(candle_manager: Any) -> List[Dict[str, Any]]:
             bias = _frame(candle_manager, spec.bias_tf)
 
             missing = []
+            bars_by_tf = {
+                entry_tf: 0 if entry is None else len(entry),
+                spec.confirm_tf: 0 if confirm is None else len(confirm),
+                spec.bias_tf: 0 if bias is None else len(bias),
+            }
             if entry is None or len(entry) < cfg.min_timeframe_bars:
                 missing.append(entry_tf)
             if confirm is None or len(confirm) < cfg.min_timeframe_bars:
@@ -246,10 +251,10 @@ def scan_gold_modes(candle_manager: Any) -> List[Dict[str, Any]]:
                 missing.append(spec.bias_tf)
 
             if missing and not cfg.signal_debug_mode:
-                logger.info("GOLD reject | %s %s | missing_tfs=%s", spec.mode, entry_tf, missing)
+                logger.info("GOLD reject | %s %s | missing_tfs=%s bars=%s", spec.mode, entry_tf, missing, bars_by_tf)
                 continue
             if entry is None or len(entry) < max(30, min(cfg.min_timeframe_bars, 50)):
-                logger.info("GOLD reject | %s %s | no_entry_frame", spec.mode, entry_tf)
+                logger.info("GOLD reject | %s %s | no_entry_frame bars=%s", spec.mode, entry_tf, bars_by_tf)
                 continue
 
             result = _score_direction(entry, confirm, bias, spec)

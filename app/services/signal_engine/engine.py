@@ -18,6 +18,7 @@ from app.services.signal_engine.smc_analyzer import SMCAnalyzer
 from app.services.signal_engine.confluence_scorer import ConfluenceScorer
 from app.services.signal_engine.signal_generator import SignalGenerator
 from app.services.signal_engine.dedup_filter import DedupFilter
+from app.services.signal_engine.signal_quality import SignalQualityEngine
 from app.services.signal_engine.rate_limiter import RateLimiter
 from app.services.signal_engine.market_hours_filter import (
     is_valid_trading_hour, get_filter_stats, reset_filter_stats,
@@ -101,6 +102,7 @@ class SignalEngine:
         self.confluence_scorer = ConfluenceScorer()
         self.signal_generator = SignalGenerator()
         self.dedup = DedupFilter(redis_pool)
+        self.signal_quality_engine = SignalQualityEngine()
         self._running = False
         self._signal_count = 0
         self._poll_tasks: List[asyncio.Task] = []
@@ -266,6 +268,17 @@ class SignalEngine:
 
     async def _emit_signal(self, signal: Dict) -> None:
         try:
+            signal = self.signal_quality_engine.enhance(signal)
+            if signal.get("quality_blocked"):
+                logger.info(
+                    "SIGNAL QUALITY BLOCKED | %s %s | probability=%s | final_quality=%s | reasons=%s",
+                    signal.get("symbol_normalized", signal.get("symbol", "?")),
+                    signal.get("direction", "?"),
+                    signal.get("signal_probability"),
+                    signal.get("final_signal_quality"),
+                    signal.get("quality_block_reasons"),
+                )
+                return
             safe_signal = _json_safe(signal)
             stream_payload = orjson.dumps(safe_signal)
             message_id = await self.redis.xadd(STREAM_KEY, {"payload": stream_payload})

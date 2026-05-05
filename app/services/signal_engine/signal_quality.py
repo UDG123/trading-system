@@ -50,6 +50,7 @@ class SignalQualityConfig:
     cluster_window_seconds: int = field(default_factory=lambda: _int_env("SIGNAL_CLUSTER_WINDOW_SECONDS", 900))
     min_probability_to_emit: float = field(default_factory=lambda: _float_env("MIN_SIGNAL_PROBABILITY", 0.52))
     min_quality_to_emit: float = field(default_factory=lambda: _float_env("MIN_FINAL_SIGNAL_QUALITY", 50.0))
+    signal_debug_mode: bool = field(default_factory=lambda: _bool_env("SIGNAL_DEBUG_MODE", False))
 
 
 class SignalQualityEngine:
@@ -80,18 +81,32 @@ class SignalQualityEngine:
 
         blocked = False
         block_reasons: List[str] = []
+        soft_block_reasons: List[str] = []
+        very_poor_quality = final_quality < max(20.0, self.config.min_quality_to_emit * 0.5)
+        very_low_probability = probability < max(0.25, self.config.min_probability_to_emit * 0.6)
+
         if self.config.enable_probability_weighting and probability < self.config.min_probability_to_emit:
-            blocked = True
-            block_reasons.append("probability_below_min")
+            if self.config.signal_debug_mode and not very_low_probability:
+                soft_block_reasons.append("probability_below_min")
+            else:
+                blocked = True
+                block_reasons.append("probability_below_min")
         if final_quality < self.config.min_quality_to_emit:
-            blocked = True
-            block_reasons.append("final_quality_below_min")
+            if self.config.signal_debug_mode and not very_poor_quality:
+                soft_block_reasons.append("final_quality_below_min")
+            else:
+                blocked = True
+                block_reasons.append("final_quality_below_min")
         if self.config.enable_hard_bias_filter and bias.get("bias_direction") not in ("NEUTRAL", enriched.get("direction")):
-            blocked = True
-            block_reasons.append("hard_cross_desk_bias_conflict")
+            if self.config.signal_debug_mode:
+                soft_block_reasons.append("hard_cross_desk_bias_conflict")
+            else:
+                blocked = True
+                block_reasons.append("hard_cross_desk_bias_conflict")
 
         enriched["quality_blocked"] = blocked
         enriched["quality_block_reasons"] = block_reasons
+        enriched["quality_would_block_reasons"] = soft_block_reasons
 
         self._recent.append((now, enriched))
         return enriched
