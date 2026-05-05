@@ -6,8 +6,8 @@ and pushes them to the Redis Stream (oniquant_alerts) for the existing pipeline.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Dict, List
+from datetime import datetime, date, timezone
+from typing import Any, Dict, List
 
 import orjson
 
@@ -28,11 +28,8 @@ logger = logging.getLogger("TradingSystem.SignalEngine")
 STREAM_KEY = "oniquant_alerts"
 
 ENGINE_DAILY_CREDIT_BUDGET = int(os.getenv("ENGINE_DAILY_CREDITS", "500"))
-# TwelveData Basic observed limit is 8 credits/min. Default to 7 to leave headroom.
 ENGINE_PER_MINUTE_LIMIT = int(os.getenv("ENGINE_PER_MINUTE_LIMIT", "7"))
 TWELVEDATA_BACKFILL_DELAY_SECONDS = float(os.getenv("TWELVEDATA_BACKFILL_DELAY_SECONDS", "8.75"))
-
-# Basic plan should not poll premium index symbols. Use only symbols available on the current key.
 _raw_td_only = os.getenv("TD_ONLY_SYMBOLS", "WTIUSD")
 TD_ONLY_SYMBOLS = {s.strip().upper() for s in _raw_td_only.split(",") if s.strip()}
 
@@ -54,20 +51,50 @@ def _resolve_symbols(desk_spec: str) -> List[str]:
         return CandleManager.get_all_symbols()
     symbols = set()
     for desk_id in desk_spec.split(","):
-        desk_id = desk_id.strip()
-        desk = DESKS.get(desk_id, {})
+        desk = DESKS.get(desk_id.strip(), {})
         symbols.update(desk.get("symbols", []))
     return sorted(symbols)
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert numpy/pandas/scalar objects into Redis/orjson-safe primitives."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    try:
+        import numpy as np
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        if value is pd.NA:
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
 
 
 class SignalEngine:
     def __init__(self, redis_pool, db_session_factory):
         self.redis = redis_pool
         self._db_factory = db_session_factory
-        self.rate_limiter = RateLimiter(
-            daily_limit=ENGINE_DAILY_CREDIT_BUDGET,
-            per_minute_limit=ENGINE_PER_MINUTE_LIMIT,
-        )
+        self.rate_limiter = RateLimiter(daily_limit=ENGINE_DAILY_CREDIT_BUDGET, per_minute_limit=ENGINE_PER_MINUTE_LIMIT)
         self.candle_manager = CandleManager(db_session_factory, self.rate_limiter)
         self.indicator_calc = IndicatorCalculator()
         self.smc_analyzer = SMCAnalyzer()
@@ -81,12 +108,8 @@ class SignalEngine:
     async def run(self) -> None:
         self._running = True
         logger.info("Signal Engine starting...")
-        logger.info(
-            "TwelveData config | per_minute_limit=%s | backfill_delay=%ss | td_only=%s",
-            ENGINE_PER_MINUTE_LIMIT, TWELVEDATA_BACKFILL_DELAY_SECONDS, sorted(TD_ONLY_SYMBOLS),
-        )
+        logger.info("TwelveData config | per_minute_limit=%s | backfill_delay=%ss | td_only=%s", ENGINE_PER_MINUTE_LIMIT, TWELVEDATA_BACKFILL_DELAY_SECONDS, sorted(TD_ONLY_SYMBOLS))
         reset_filter_stats()
-
         try:
             await self._notify_start()
             all_symbols = CandleManager.get_all_symbols()
@@ -96,8 +119,7 @@ class SignalEngine:
 
             try:
                 from app.services.data_providers.kraken_ws import KrakenOHLCStream
-                kraken = KrakenOHLCStream(self._db_factory)
-                self._poll_tasks.append(asyncio.create_task(kraken.run(), name="kraken_ws"))
+                self._poll_tasks.append(asyncio.create_task(KrakenOHLCStream(self._db_factory).run(), name="kraken_ws"))
                 logger.info("Kraken WS stream started (5 crypto pairs)")
             except Exception as e:
                 logger.debug(f"Kraken WS start failed: {e}")
@@ -105,8 +127,7 @@ class SignalEngine:
             if os.getenv("ENABLE_OANDA_STREAM", "false").lower() in {"1", "true", "yes", "on"}:
                 try:
                     from app.services.data_providers.oanda_stream import OANDAStream
-                    oanda = OANDAStream(self._db_factory)
-                    self._poll_tasks.append(asyncio.create_task(oanda.run(), name="oanda_stream"))
+                    self._poll_tasks.append(asyncio.create_task(OANDAStream(self._db_factory).run(), name="oanda_stream"))
                     logger.info("OANDA stream started (16 FX+metals)")
                 except Exception as e:
                     logger.debug(f"OANDA stream start failed: {e}")
@@ -115,11 +136,18 @@ class SignalEngine:
 
             try:
                 from app.services.data_providers.alpaca_ws import AlpacaBarStream
-                alpaca = AlpacaBarStream(self._db_factory)
-                self._poll_tasks.append(asyncio.create_task(alpaca.run(), name="alpaca_ws"))
+                self._poll_tasks.append(asyncio.create_task(AlpacaBarStream(self._db_factory).run(), name="alpaca_ws"))
                 logger.info("Alpaca WS stream started (9 equities)")
             except Exception as e:
                 logger.debug(f"Alpaca WS start failed: {e}")
+
+            if os.getenv("ENABLE_MCP_MARKET_DATA", "false").lower() in {"1", "true", "yes", "on"}:
+                try:
+                    from app.services.data_providers.mcp_market_data import MCPMarketDataProvider
+                    self._poll_tasks.append(asyncio.create_task(MCPMarketDataProvider(self.candle_manager).run(), name="mcp_market_data"))
+                    logger.info("MCP market data provider started")
+                except Exception as e:
+                    logger.warning("MCP market data provider failed to start: %s", e)
 
             async def _resample_loop():
                 while self._running:
@@ -133,7 +161,6 @@ class SignalEngine:
                     except Exception as e:
                         logger.debug(f"Resample error: {e}")
                     await asyncio.sleep(300)
-
             self._poll_tasks.append(asyncio.create_task(_resample_loop(), name="ohlcv_resampler"))
 
             for tf, config in POLLING_SCHEDULE.items():
@@ -141,8 +168,7 @@ class SignalEngine:
                 if not symbols:
                     logger.info("Poll loop skipped | %s | no TD_ONLY symbols", tf)
                     continue
-                task = asyncio.create_task(self._poll_loop(tf, config["interval"], symbols), name=f"poll_{tf}")
-                self._poll_tasks.append(task)
+                self._poll_tasks.append(asyncio.create_task(self._poll_loop(tf, config["interval"], symbols), name=f"poll_{tf}"))
 
             from app.services.signal_engine.desk_scanner import DeskScanner, SCAN_INTERVALS
             scanner = DeskScanner(self.candle_manager)
@@ -150,12 +176,7 @@ class SignalEngine:
                 self._poll_tasks.append(asyncio.create_task(self._desk_scan_loop(scanner, desk_id, interval_sec), name=f"scan_{desk_id}"))
 
             logger.info("Desk scanners started: " + ", ".join(f"{d}@{s}s" for d, s in SCAN_INTERVALS.items()))
-            td_count = len(TD_ONLY_SYMBOLS)
-            free_count = len(all_symbols) - td_count
-            logger.info(
-                f"Signal Engine ONLINE | {len(all_symbols)} symbols | Free streams: {free_count} | "
-                f"TwelveData: {td_count} | Budget: {ENGINE_DAILY_CREDIT_BUDGET} credits/day"
-            )
+            logger.info(f"Signal Engine ONLINE | {len(all_symbols)} symbols | Free streams: {len(all_symbols) - len(TD_ONLY_SYMBOLS)} | TwelveData: {len(TD_ONLY_SYMBOLS)} | Budget: {ENGINE_DAILY_CREDIT_BUDGET} credits/day")
             await asyncio.gather(*self._poll_tasks, return_exceptions=True)
         except asyncio.CancelledError:
             logger.info("Signal Engine shutting down...")
@@ -174,7 +195,6 @@ class SignalEngine:
         stagger = tf_order.index(timeframe) * 5 if timeframe in tf_order else 0
         await asyncio.sleep(stagger)
         logger.info(f"Poll loop started | {timeframe} | {len(symbols)} symbols | Every {interval_seconds}s")
-
         while self._running:
             cycle_start = asyncio.get_event_loop().time()
             for symbol in symbols:
@@ -194,7 +214,6 @@ class SignalEngine:
                             continue
                     else:
                         active_desks = desks
-
                     new_bars = await self.candle_manager.fetch_latest(symbol, timeframe)
                     if not new_bars:
                         await asyncio.sleep(0.3)
@@ -208,8 +227,7 @@ class SignalEngine:
                     if ENABLE_ADAPTIVE_INDICATORS and ENABLE_HMM_REGIME:
                         try:
                             from app.services.signal_engine.regime_detector import HMMRegimeDetector
-                            _det = HMMRegimeDetector(redis_pool=self.redis)
-                            _regime = await _det.get_regime(symbol)
+                            _regime = await HMMRegimeDetector(redis_pool=self.redis).get_regime(symbol)
                             regime_label = _regime.get("regime", "UNKNOWN") if _regime else None
                         except Exception:
                             pass
@@ -219,27 +237,20 @@ class SignalEngine:
                         continue
                     smc = self.smc_analyzer.analyze(df, symbol)
                     for desk_id in active_desks:
-                        signal = self.signal_generator.evaluate(
-                            symbol=symbol, timeframe=timeframe, desk_id=desk_id,
-                            indicators=indicators, smc=smc, candle_manager=self.candle_manager,
-                            confluence_scorer=self.confluence_scorer,
-                        )
+                        signal = self.signal_generator.evaluate(symbol=symbol, timeframe=timeframe, desk_id=desk_id, indicators=indicators, smc=smc, candle_manager=self.candle_manager, confluence_scorer=self.confluence_scorer)
                         if signal and not await self.dedup.is_duplicate(signal):
                             await self._emit_signal(signal)
                 except Exception as e:
                     logger.debug(f"Poll error for {symbol} {timeframe}: {e}")
                 await asyncio.sleep(TWELVEDATA_BACKFILL_DELAY_SECONDS)
-
-            elapsed = asyncio.get_event_loop().time() - cycle_start
-            remaining = max(0, interval_seconds - elapsed)
+            remaining = max(0, interval_seconds - (asyncio.get_event_loop().time() - cycle_start))
             if remaining > 0:
                 await asyncio.sleep(remaining)
 
     async def _desk_scan_loop(self, scanner, desk_id: str, interval_seconds: int) -> None:
         from app.services.signal_engine.desk_scanner import DeskScanner
         desk_order = list(DESKS.keys())
-        stagger = desk_order.index(desk_id) * 3 if desk_id in desk_order else 0
-        await asyncio.sleep(stagger + 10)
+        await asyncio.sleep((desk_order.index(desk_id) * 3 if desk_id in desk_order else 0) + 10)
         logger.info(f"Desk scan loop started | {desk_id} | every {interval_seconds}s")
         while self._running:
             try:
@@ -255,14 +266,22 @@ class SignalEngine:
 
     async def _emit_signal(self, signal: Dict) -> None:
         try:
-            stream_payload = orjson.dumps(signal)
+            safe_signal = _json_safe(signal)
+            stream_payload = orjson.dumps(safe_signal)
             message_id = await self.redis.xadd(STREAM_KEY, {"payload": stream_payload})
             self._signal_count += 1
             logger.info(
-                f"SIGNAL EMITTED #{self._signal_count} | {signal['symbol_normalized']} {signal['direction']} "
-                f"{signal['alert_type']} | Confluence: {signal.get('confluence_score', '?'):.1f} | "
-                f"Strategy: {signal.get('strategy_id', '?')} | Desks: {signal.get('desks_matched', [])} | "
-                f"Redis={STREAM_KEY}:{message_id} | payload_bytes={len(stream_payload)}"
+                "SIGNAL EMITTED #%s | %s %s %s | Confluence: %s | Strategy: %s | Desks: %s | Redis=%s:%s | payload_bytes=%s",
+                self._signal_count,
+                safe_signal.get("symbol_normalized", safe_signal.get("symbol", "?")),
+                safe_signal.get("direction", "?"),
+                safe_signal.get("alert_type", "?"),
+                safe_signal.get("confluence_score", "?"),
+                safe_signal.get("strategy_id", "?"),
+                safe_signal.get("desks_matched", []),
+                STREAM_KEY,
+                message_id,
+                len(stream_payload),
             )
         except Exception as e:
             logger.error(f"Failed to emit signal: {e}")

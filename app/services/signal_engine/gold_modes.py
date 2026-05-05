@@ -1,4 +1,4 @@
-from typing import Dict, List
+"""DESK4_GOLD mode router and precision scoring.
 
 from app.config import SIGNAL_DEBUG_MODE
 
