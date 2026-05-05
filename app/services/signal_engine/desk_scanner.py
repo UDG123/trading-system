@@ -77,7 +77,8 @@ class DeskScanner:
                 regime = detect_regime_adx_atr(indicators)
 
             if desk_id == "DESK4_GOLD":
-                gold_candidates = scan_gold_modes(self._cm)
+                timeframe_state = {"1M": self._cm.get_dataframe(symbol, "1M") is not None, "5M": self._cm.get_dataframe(symbol, "5M") is not None, "15M": self._cm.get_dataframe(symbol, "15M") is not None, "1H": self._cm.get_dataframe(symbol, "1H") is not None, "4H": self._cm.get_dataframe(symbol, "4H") is not None, "D": self._cm.get_dataframe(symbol, "D") is not None, "W": self._cm.get_dataframe(symbol, "W") is not None}
+                gold_candidates = scan_gold_modes(symbol=symbol, regime=regime or "TRANSITIONAL", spread_ok=True, timeframe_state=timeframe_state)
                 for result in gold_candidates:
                     price = float(df["close"].iloc[-1])
                     atr = float(indicators.get("atr", 0) or 0)
