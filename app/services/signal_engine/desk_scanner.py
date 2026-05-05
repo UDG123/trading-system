@@ -77,21 +77,20 @@ class DeskScanner:
                 regime = detect_regime_adx_atr(indicators)
 
             if desk_id == "DESK4_GOLD":
-                timeframe_state = {"1M": self._cm.get_dataframe(symbol, "1M") is not None, "5M": self._cm.get_dataframe(symbol, "5M") is not None, "15M": self._cm.get_dataframe(symbol, "15M") is not None, "1H": self._cm.get_dataframe(symbol, "1H") is not None, "4H": self._cm.get_dataframe(symbol, "4H") is not None, "D": self._cm.get_dataframe(symbol, "D") is not None, "W": self._cm.get_dataframe(symbol, "W") is not None}
-                gold_candidates = scan_gold_modes(symbol=symbol, regime=regime or "TRANSITIONAL", spread_ok=True, timeframe_state=timeframe_state)
+                gold_candidates = scan_gold_modes(self._cm)
                 for result in gold_candidates:
                     price = float(df["close"].iloc[-1])
                     atr = float(indicators.get("atr", 0) or 0)
                     result.update({
                         "symbol": symbol,
                         "desk_id": desk_id,
-                        "timeframe": entry_tf,
-                        "direction": result.get("direction", "LONG"),
+                        "timeframe": result.get("timeframe", entry_tf),
+                        "direction": result.get("direction", "BUY"),
                         "alert_type": result.get("alert_type", "bullish_confirmation"),
-                        "confidence": result.get("confidence", 0.6),
+                        "confidence": float(result.get("confluence_score", 60.0) or 60.0) / 100.0,
                         "price": price,
                         "atr": atr,
-                        "regime": regime,
+                        "regime": result.get("regime", regime),
                         "stack_id": result.get("stack_id", "GOLD_MODE"),
                     })
                     self._apply_atr_targets(result, desk_id, symbol, entry_tf, price, atr)
@@ -186,7 +185,8 @@ class DeskScanner:
         sl_mult = cfg.get("sl_mult", 2.0)
         tp1_mult = cfg.get("tp1_mult", 4.0)
         tp2_mult = cfg.get("tp2_mult", 6.0)
-        if result.get("direction") == "LONG":
+        direction = str(result.get("direction", "")).upper()
+        if direction in {"LONG", "BUY"}:
             result["sl"] = round(price - atr * sl_mult, 5)
             result["tp1"] = round(price + atr * tp1_mult, 5)
             result["tp2"] = round(price + atr * tp2_mult, 5)
@@ -199,7 +199,8 @@ class DeskScanner:
     def build_signal_payload(candidate: Dict) -> Dict:
         """Convert a raw candidate into the Redis Stream payload format."""
         symbol = candidate["symbol"]
-        direction = candidate["direction"]
+        raw_direction = str(candidate["direction"]).upper()
+        direction = "LONG" if raw_direction in {"LONG", "BUY"} else "SHORT"
         desk_id = candidate["desk_id"]
         desks_matched = get_desk_for_symbol(symbol)
         if desk_id not in desks_matched:
