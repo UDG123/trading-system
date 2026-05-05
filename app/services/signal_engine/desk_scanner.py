@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 import os
-from app.config import DESKS, get_desk_for_symbol, get_atr_settings
+from app.config import DESKS, get_desk_for_symbol, get_atr_settings, SIGNAL_DEBUG_MODE, MIN_TIMEFRAME_BARS, MIN_CONFLUENCE_SCORE, QUALITY_SCORE_THRESHOLD, ALLOW_WEAK_TEST_SIGNALS
 from app.services.signal_engine.indicator_calculator import IndicatorCalculator
 from app.services.signal_engine.strategy_stacks import run_stacks, detect_regime_adx_atr
 from app.services.signal_engine.market_hours_filter import is_valid_trading_hour
@@ -61,12 +61,14 @@ class DeskScanner:
                 continue
 
             df = self._cm.get_dataframe(symbol, entry_tf)
-            if df is None or len(df) < 50:
-                logger.debug("SCAN REJECT | %s %s | insufficient_data len=%s", desk_id, symbol, 0 if df is None else len(df))
+            if df is None or len(df) < MIN_TIMEFRAME_BARS:
+                logger.debug("SCAN REJECT | %s %s | insufficient_data len=%s min=%s", desk_id, symbol, 0 if df is None else len(df), MIN_TIMEFRAME_BARS)
                 continue
 
             regime = regime_cache.get(symbol)
             indicators = self._calc.compute(df, symbol, entry_tf, regime=regime)
+            logger.debug("SCAN INPUT | %s %s | has_df=%s len=%s tf=%s", desk_id, symbol, df is not None, 0 if df is None else len(df), entry_tf)
+
             if not indicators:
                 logger.debug("SCAN REJECT | %s %s | indicators_empty", desk_id, symbol)
                 continue
@@ -75,7 +77,8 @@ class DeskScanner:
                 regime = detect_regime_adx_atr(indicators)
 
             if desk_id == "DESK4_GOLD":
-                gold_candidates = scan_gold_modes(symbol=symbol, regime=regime or "TRANSITIONAL", spread_ok=True)
+                timeframe_state = {"1M": self._cm.get_dataframe(symbol, "1M") is not None, "5M": self._cm.get_dataframe(symbol, "5M") is not None, "15M": self._cm.get_dataframe(symbol, "15M") is not None, "1H": self._cm.get_dataframe(symbol, "1H") is not None, "4H": self._cm.get_dataframe(symbol, "4H") is not None, "D": self._cm.get_dataframe(symbol, "D") is not None, "W": self._cm.get_dataframe(symbol, "W") is not None}
+                gold_candidates = scan_gold_modes(symbol=symbol, regime=regime or "TRANSITIONAL", spread_ok=True, timeframe_state=timeframe_state)
                 for result in gold_candidates:
                     price = float(df["close"].iloc[-1])
                     atr = float(indicators.get("atr", 0) or 0)
@@ -92,11 +95,27 @@ class DeskScanner:
                         "stack_id": result.get("stack_id", "GOLD_MODE"),
                     })
                     self._apply_atr_targets(result, desk_id, symbol, entry_tf, price, atr)
+                    result.setdefault("signal_debug", SIGNAL_DEBUG_MODE)
+                    result.setdefault("required_timeframes_present", True)
+                    result.setdefault("quality_hints", [])
+                    confluence_score = float(result.get("confidence", 0) * 10)
+                    quality_score = float(result.get("confidence", 0) * 100)
+                    blocked = []
+                    if confluence_score < MIN_CONFLUENCE_SCORE:
+                        blocked.append("confluence_below_min")
+                    if quality_score < QUALITY_SCORE_THRESHOLD:
+                        blocked.append("quality_below_threshold")
+                    if blocked and not (SIGNAL_DEBUG_MODE or ALLOW_WEAK_TEST_SIGNALS):
+                        logger.debug("SCAN REJECT | %s %s | %s confluence=%.2f quality=%.2f", desk_id, symbol, ",".join(blocked), confluence_score, quality_score)
+                        continue
+                    if blocked:
+                        result["candidate_debug"] = {"would_block": blocked, "min_confluence": MIN_CONFLUENCE_SCORE, "quality_threshold": QUALITY_SCORE_THRESHOLD}
                     candidates.append(result)
                     self._signal_count += 1
                 continue
 
             stack_results = run_stacks(df, indicators, symbol, regime, desk_id=desk_id)
+            logger.debug("STACK RESULT | %s %s | count=%s regime=%s", desk_id, symbol, len(stack_results), regime)
 
             for result in stack_results:
                 price = indicators.get("price", 0)
@@ -129,6 +148,21 @@ class DeskScanner:
                     )
                     continue
 
+                result.setdefault("signal_debug", SIGNAL_DEBUG_MODE)
+                result.setdefault("required_timeframes_present", True)
+                result.setdefault("quality_hints", [])
+                confluence_score = float(result.get("confidence", 0) * 10)
+                quality_score = float(result.get("confidence", 0) * 100)
+                blocked = []
+                if confluence_score < MIN_CONFLUENCE_SCORE:
+                    blocked.append("confluence_below_min")
+                if quality_score < QUALITY_SCORE_THRESHOLD:
+                    blocked.append("quality_below_threshold")
+                if blocked and not (SIGNAL_DEBUG_MODE or ALLOW_WEAK_TEST_SIGNALS):
+                    logger.debug("SCAN REJECT | %s %s | %s confluence=%.2f quality=%.2f", desk_id, symbol, ",".join(blocked), confluence_score, quality_score)
+                    continue
+                if blocked:
+                    result["candidate_debug"] = {"would_block": blocked, "min_confluence": MIN_CONFLUENCE_SCORE, "quality_threshold": QUALITY_SCORE_THRESHOLD}
                 candidates.append(result)
                 self._signal_count += 1
 
