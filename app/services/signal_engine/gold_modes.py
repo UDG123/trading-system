@@ -1,4 +1,4 @@
-from typing import Dict, List
+"""DESK4_GOLD mode router and precision scoring.
 
 from app.config import SIGNAL_DEBUG_MODE
 
@@ -26,14 +26,25 @@ def scan_gold_modes(symbol: str, regime: str, spread_ok: bool = True, macro_blac
     out: List[Dict] = []
     spread_warning = None if spread_ok else "spread_unacceptable"
 
-    scalp_tf_ok = any(timeframe_state.get(tf, False) for tf in ["1M", "5M"]) and timeframe_state.get("15M", False) and timeframe_state.get("1H", False)
-    intraday_tf_ok = timeframe_state.get("15M", False) and timeframe_state.get("1H", False) and timeframe_state.get("4H", False)
-    swing_tf_ok = timeframe_state.get("4H", False) and timeframe_state.get("D", False)
+            missing = []
+            bars_by_tf = {
+                entry_tf: 0 if entry is None else len(entry),
+                spec.confirm_tf: 0 if confirm is None else len(confirm),
+                spec.bias_tf: 0 if bias is None else len(bias),
+            }
+            if entry is None or len(entry) < cfg.min_timeframe_bars:
+                missing.append(entry_tf)
+            if confirm is None or len(confirm) < cfg.min_timeframe_bars:
+                missing.append(spec.confirm_tf)
+            if bias is None or len(bias) < cfg.min_timeframe_bars:
+                missing.append(spec.bias_tf)
 
-    if spread_ok and not macro_blackout and scalp_tf_ok:
-        out.append(_mode_payload("GOLD_SCALP", "fast_momentum_vwap_ema", f"{regime} scalp with EMA/VWAP reclaim and squeeze breakout", ["entry:1M/5M", "confirm:15M", "bias:1H", "atr_sl_tp", "range_fade_only_when_ranging"] ))
-    elif SIGNAL_DEBUG_MODE:
-        out.append(_mode_payload("GOLD_SCALP", "fast_momentum_vwap_ema", "debug_soft_pass", ["candidate_debug"], rejected=spread_warning or ("missing_required_timeframes" if not scalp_tf_ok else "macro_blackout"), tf_ok=scalp_tf_ok))
+            if missing and not cfg.signal_debug_mode:
+                logger.info("GOLD reject | %s %s | missing_tfs=%s bars=%s", spec.mode, entry_tf, missing, bars_by_tf)
+                continue
+            if entry is None or len(entry) < max(30, min(cfg.min_timeframe_bars, 50)):
+                logger.info("GOLD reject | %s %s | no_entry_frame bars=%s", spec.mode, entry_tf, bars_by_tf)
+                continue
 
     regime_ok = regime in {"TRENDING", "VOLATILE", "TRANSITIONAL"}
     if (spread_ok and regime_ok and intraday_tf_ok) or (SIGNAL_DEBUG_MODE and spread_ok and intraday_tf_ok):
