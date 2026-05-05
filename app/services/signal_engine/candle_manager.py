@@ -5,42 +5,38 @@ DataFrames in memory for fast indicator computation.
 Reuses symbol mappings from ohlcv_ingester.
 """
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
-import numpy as np
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import DESKS
-from app.services.ohlcv_ingester import TD_MAP, CRYPTO_SYMBOLS, EQUITY_SYMBOLS, BYBIT_MAP
+from app.services.ohlcv_ingester import TD_MAP, CRYPTO_SYMBOLS, EQUITY_SYMBOLS
 from app.services.signal_engine.rate_limiter import RateLimiter
 
 logger = logging.getLogger("TradingSystem.SignalEngine.CandleManager")
 
-# TwelveData interval strings
 TF_TO_TD_INTERVAL = {
     "1M": "1min", "5M": "5min", "15M": "15min",
     "1H": "1h", "4H": "4h", "D": "1day", "W": "1week",
 }
 
-# DB table per timeframe
 TF_TO_TABLE = {
     "1M": "ohlcv_1m", "5M": "ohlcv_5m", "15M": "ohlcv_15m",
     "1H": "ohlcv_1h", "4H": "ohlcv_4h", "D": "ohlcv_1d", "W": "ohlcv_1w",
 }
 
-# Rolling window sizes (bars kept in memory)
 LOOKBACK_BARS = {
-    "1M": 2000,  # ~33 hours — expanded for free data providers
-    "5M": 2000,  # ~7 days
-    "15M": 2000, # ~21 days
-    "1H": 2000,  # ~83 days
-    "4H": 500,   # ~83 days
-    "D": 500,    # ~2 years
-    "W": 104,    # ~2 years
+    "1M": 2000,
+    "5M": 2000,
+    "15M": 2000,
+    "1H": 2000,
+    "4H": 500,
+    "D": 500,
+    "W": 104,
 }
 
 
@@ -58,10 +54,7 @@ class CandleManager:
         self._rate_limiter = rate_limiter or RateLimiter()
         self._client = httpx.AsyncClient(timeout=15.0)
         self._api_key: Optional[str] = None
-
-        # In-memory cache: {(symbol, timeframe): DataFrame}
         self._frames: Dict[tuple, pd.DataFrame] = {}
-        # Track last fetched timestamp per symbol-TF
         self._last_fetch: Dict[tuple, datetime] = {}
 
     async def close(self) -> None:
@@ -73,27 +66,13 @@ class CandleManager:
             self._api_key = os.getenv("TWELVEDATA_API_KEY", "")
         return self._api_key
 
-    # ── Public API ──
-
     def get_dataframe(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
-        """Get the in-memory DataFrame for a symbol-timeframe pair."""
         return self._frames.get((symbol, timeframe))
 
     def get_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
-        """Get all cached timeframes for a symbol."""
-        result = {}
-        for (sym, tf), df in self._frames.items():
-            if sym == symbol and len(df) > 0:
-                result[tf] = df
-        return result
+        return {tf: df for (sym, tf), df in self._frames.items() if sym == symbol and len(df) > 0}
 
     def update_dataframe(self, symbol: str, timeframe: str, candles: List[Dict]) -> int:
-        """Load provider-normalized candles into the in-memory DataFrame cache.
-
-        This intentionally avoids requiring database writes so the internal
-        scanner can run from live/historical providers, including mock data,
-        even when PostgreSQL is unavailable.
-        """
         if not candles:
             return 0
         normalized = []
@@ -105,7 +84,7 @@ class CandleManager:
                     "high": float(candle["high"]),
                     "low": float(candle["low"]),
                     "close": float(candle["close"]),
-                    "volume": None if candle.get("volume") is None else float(candle.get("volume") or 0),
+                    "volume": float(candle.get("volume", 0) or 0),
                     "provider": candle.get("provider"),
                 })
             except (KeyError, TypeError, ValueError):
@@ -113,97 +92,80 @@ class CandleManager:
         if not normalized:
             return 0
         new_df = pd.DataFrame(normalized)
-        new_df["time"] = pd.to_datetime(new_df["time"], utc=True)
+        new_df["time"] = pd.to_datetime(new_df["time"], utc=True, errors="coerce")
+        new_df = new_df.dropna(subset=["time"])
         new_df = new_df.sort_values("time").drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
         for col in ["open", "high", "low", "close", "volume"]:
             new_df[col] = pd.to_numeric(new_df[col], errors="coerce")
 
         key = (symbol, timeframe)
         existing = self._frames.get(key)
-        if existing is not None and len(existing) > 0:
-            combined = pd.concat([existing, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["time"], keep="last")
-            combined = combined.sort_values("time").reset_index(drop=True)
-        else:
-            combined = new_df
-        max_bars = LOOKBACK_BARS.get(timeframe, 300)
-        self._frames[key] = combined.tail(max_bars).reset_index(drop=True)
+        combined = pd.concat([existing, new_df], ignore_index=True) if existing is not None and len(existing) > 0 else new_df
+        combined = combined.drop_duplicates(subset=["time"], keep="last").sort_values("time").reset_index(drop=True)
+        self._frames[key] = combined.tail(LOOKBACK_BARS.get(timeframe, 300)).reset_index(drop=True)
         return len(new_df)
 
     load_candles = update_dataframe
 
     async def initial_backfill(self, symbols: List[str], timeframes: List[str]) -> None:
-        """Load historical data from DB into memory for all symbol-TF pairs."""
         db = self._db_factory()
+        loaded_pairs = 0
         try:
             for symbol in symbols:
                 for tf in timeframes:
                     df = self._load_from_db(db, symbol, tf)
                     if df is not None and len(df) > 0:
                         self._frames[(symbol, tf)] = df
-                        logger.debug(
-                            f"Backfill | {symbol} {tf} | {len(df)} bars from DB"
-                        )
-                    else:
-                        # Fetch from API if DB is empty
-                        bars = await self._fetch_bars(symbol, tf, outputsize=LOOKBACK_BARS.get(tf, 200))
-                        if bars:
-                            self._store_and_cache(db, symbol, tf, bars)
-                            logger.info(f"Backfill API | {symbol} {tf} | {len(bars)} bars fetched")
-        finally:
-            db.close()
+                        loaded_pairs += 1
+                        logger.debug("Backfill DB | %s %s | %s bars", symbol, tf, len(df))
+                        continue
 
-        total = len(self._frames)
-        logger.info(f"Backfill complete | {total} symbol-TF pairs loaded")
+                    bars = await self._fetch_bars(symbol, tf, outputsize=LOOKBACK_BARS.get(tf, 200))
+                    if bars:
+                        count = self._store_and_cache(db, symbol, tf, bars)
+                        if count > 0 and self._frames.get((symbol, tf)) is not None:
+                            loaded_pairs += 1
+                        logger.info("Backfill API | %s %s | %s bars fetched/cached", symbol, tf, len(bars))
+        finally:
+            if db is not None:
+                db.close()
+
+        logger.info("Backfill complete | %s symbol-TF pairs loaded", loaded_pairs)
 
     async def fetch_latest(self, symbol: str, timeframe: str) -> int:
-        """Fetch latest candles for a symbol-TF. Returns count of new bars."""
         bars = await self._fetch_bars(symbol, timeframe, outputsize=5)
         if not bars:
             return 0
-
         db = self._db_factory()
         try:
             new_count = self._store_and_cache(db, symbol, timeframe, bars)
         finally:
-            db.close()
-
+            if db is not None:
+                db.close()
         self._last_fetch[(symbol, timeframe)] = datetime.now(timezone.utc)
         return new_count
 
-    # ── TwelveData Fetch ──
-
-    async def _fetch_bars(
-        self, symbol: str, timeframe: str, outputsize: int = 200
-    ) -> List[Dict]:
-        """Fetch OHLCV bars from TwelveData."""
+    async def _fetch_bars(self, symbol: str, timeframe: str, outputsize: int = 200) -> List[Dict]:
         if not self._rate_limiter.can_request():
             wait = self._rate_limiter.seconds_until_minute_slot()
-            logger.debug(f"Rate limited, waiting {wait:.1f}s for {symbol} {timeframe}")
+            logger.debug("Rate limited, waiting %.1fs for %s %s", wait, symbol, timeframe)
             return []
 
         td_interval = TF_TO_TD_INTERVAL.get(timeframe)
         if not td_interval:
-            logger.warning(f"Unknown timeframe: {timeframe}")
+            logger.warning("Unknown timeframe: %s", timeframe)
             return []
 
-        # Map symbol to TwelveData format
         td_symbol = TD_MAP.get(symbol)
-
-        # Equities use their ticker directly
         if not td_symbol and symbol in EQUITY_SYMBOLS:
             td_symbol = symbol
-
-        # Crypto: TwelveData uses BTC/USD format
         if not td_symbol and symbol in CRYPTO_SYMBOLS:
-            crypto_map = {
+            td_symbol = {
                 "BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD",
                 "SOLUSD": "SOL/USD", "XRPUSD": "XRP/USD", "LINKUSD": "LINK/USD",
-            }
-            td_symbol = crypto_map.get(symbol)
-
+            }.get(symbol)
         if not td_symbol:
-            logger.warning(f"No TwelveData mapping for {symbol}")
+            logger.warning("No TwelveData mapping for %s", symbol)
             return []
 
         try:
@@ -221,16 +183,18 @@ class CandleManager:
             self._rate_limiter.record_request()
             data = resp.json()
 
-            if data.get("status") == "error":
-                logger.debug(f"TwelveData error for {symbol} {timeframe}: {data.get('message')}")
+            if data.get("status") == "error" or data.get("code") in (400, 401, 403, 429):
+                logger.warning("TwelveData error for %s %s: %s", symbol, timeframe, data.get("message", data))
                 return []
 
             values = data.get("values", [])
             if not values:
+                logger.debug("TwelveData empty values for %s %s | keys=%s", symbol, timeframe, list(data.keys()))
                 return []
 
             bars = []
-            for v in values:
+            # TwelveData returns newest-first. Cache oldest-first.
+            for v in reversed(values):
                 try:
                     bars.append({
                         "time": v["datetime"],
@@ -239,78 +203,56 @@ class CandleManager:
                         "low": float(v["low"]),
                         "close": float(v["close"]),
                         "volume": float(v.get("volume", 0) or 0),
+                        "provider": "twelvedata",
                     })
-                except (ValueError, KeyError):
+                except (ValueError, KeyError, TypeError):
                     continue
-
+            if not bars:
+                logger.warning("TwelveData parsed 0 bars for %s %s from %s values", symbol, timeframe, len(values))
             return bars
-
         except Exception as e:
-            logger.debug(f"Fetch failed for {symbol} {timeframe}: {e}")
+            logger.debug("Fetch failed for %s %s: %s", symbol, timeframe, e)
             return []
 
-    # ── Database Storage ──
-
-    def _store_and_cache(
-        self, db: Session, symbol: str, timeframe: str, bars: List[Dict]
-    ) -> int:
-        """Store bars in DB and update in-memory cache. Returns new bar count."""
+    def _store_and_cache(self, db: Session, symbol: str, timeframe: str, bars: List[Dict]) -> int:
         table = TF_TO_TABLE.get(timeframe)
         if not table or not bars:
             return 0
 
-        # Upsert into DB — batch insert with rollback on failure
-        try:
-            for bar in bars:
-                db.execute(
-                    text(f"""
-                        INSERT INTO {table} (time, symbol, open, high, low, close, volume)
-                        VALUES (:time, :symbol, :open, :high, :low, :close, :volume)
-                        ON CONFLICT (time, symbol) DO NOTHING
-                    """),
-                    {
-                        "time": bar["time"],
-                        "symbol": symbol,
-                        "open": bar["open"],
-                        "high": bar["high"],
-                        "low": bar["low"],
-                        "close": bar["close"],
-                        "volume": bar["volume"],
-                    },
-                )
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logger.debug(f"DB insert failed for {symbol} {timeframe} ({table}): {e}")
+        inserted = 0
+        if db is not None:
+            try:
+                for bar in bars:
+                    result = db.execute(
+                        text(f"""
+                            INSERT INTO {table} (time, symbol, open, high, low, close, volume)
+                            VALUES (:time, :symbol, :open, :high, :low, :close, :volume)
+                            ON CONFLICT (time, symbol) DO NOTHING
+                        """),
+                        {
+                            "time": bar["time"],
+                            "symbol": symbol,
+                            "open": bar["open"],
+                            "high": bar["high"],
+                            "low": bar["low"],
+                            "close": bar["close"],
+                            "volume": bar.get("volume", 0),
+                        },
+                    )
+                    if getattr(result, "rowcount", 0) > 0:
+                        inserted += 1
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.warning("DB insert failed for %s %s (%s): %s; continuing with memory cache", symbol, timeframe, table, e)
 
-        # Update in-memory DataFrame
-        new_df = pd.DataFrame(bars)
-        new_df["time"] = pd.to_datetime(new_df["time"], utc=True)
-        new_df = new_df.sort_values("time").reset_index(drop=True)
-
-        key = (symbol, timeframe)
-        existing = self._frames.get(key)
-        if existing is not None and len(existing) > 0:
-            combined = pd.concat([existing, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["time"], keep="last")
-            combined = combined.sort_values("time").reset_index(drop=True)
-        else:
-            combined = new_df
-
-        # Trim to lookback
-        max_bars = LOOKBACK_BARS.get(timeframe, 200)
-        if len(combined) > max_bars:
-            combined = combined.tail(max_bars).reset_index(drop=True)
-
-        self._frames[key] = combined
-        return len(bars)
+        cached = self.update_dataframe(symbol, timeframe, bars)
+        return max(inserted, cached)
 
     def _load_from_db(self, db: Session, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
-        """Load recent bars from DB into a DataFrame."""
         table = TF_TO_TABLE.get(timeframe)
-        if not table:
+        if not table or db is None:
             return None
-
         max_bars = LOOKBACK_BARS.get(timeframe, 200)
         try:
             result = db.execute(
@@ -323,51 +265,42 @@ class CandleManager:
                 """),
                 {"symbol": symbol, "limit": max_bars},
             ).fetchall()
-
             if not result:
                 return None
-
             df = pd.DataFrame(result, columns=["time", "open", "high", "low", "close", "volume"])
-            df["time"] = pd.to_datetime(df["time"], utc=True)
-            df = df.sort_values("time").reset_index(drop=True)
+            df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+            df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
             return df
-
         except Exception as e:
-            logger.debug(f"DB load failed for {symbol} {timeframe}: {e}")
+            logger.debug("DB load failed for %s %s: %s", symbol, timeframe, e)
             return None
-
-    # ── Utility ──
 
     @staticmethod
     def get_all_symbols() -> List[str]:
-        """Get deduplicated list of all symbols across all desks."""
         symbols = set()
-        for desk_id, desk in DESKS.items():
+        for desk in DESKS.values():
             symbols.update(desk.get("symbols", []))
         return sorted(symbols)
 
     @staticmethod
     def get_desk_timeframes(desk_id: str) -> List[str]:
-        """Get the timeframes a desk uses (bias, confirmation, entry)."""
         desk = DESKS.get(desk_id, {})
         tfs = desk.get("timeframes", {})
         result = set()
         for tf_str in tfs.values():
-            # Handle comma-separated TFs like "5M,15M,1H"
             for t in tf_str.split(","):
                 t = t.strip().upper()
                 if t in TF_TO_TD_INTERVAL:
                     result.add(t)
-        return sorted(result, key=lambda x: list(TF_TO_TD_INTERVAL.keys()).index(x)
-                       if x in TF_TO_TD_INTERVAL else 99)
+        order = list(TF_TO_TD_INTERVAL.keys())
+        return sorted(result, key=lambda x: order.index(x) if x in order else 99)
 
     @staticmethod
     def get_required_timeframes() -> List[str]:
-        """Get all unique timeframes needed across all desks."""
         all_tfs = set()
         for desk_id in DESKS:
             all_tfs.update(CandleManager.get_desk_timeframes(desk_id))
-        return sorted(all_tfs, key=lambda x: list(TF_TO_TD_INTERVAL.keys()).index(x)
-                       if x in TF_TO_TD_INTERVAL else 99)
+        order = list(TF_TO_TD_INTERVAL.keys())
+        return sorted(all_tfs, key=lambda x: order.index(x) if x in order else 99)
