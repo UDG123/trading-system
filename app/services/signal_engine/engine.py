@@ -323,8 +323,13 @@ class SignalEngine:
         while self._running:
             try:
                 candidates = scanner.scan_desk(desk_id)
+                logger.info("Desk %s produced %s candidates", desk_id, len(candidates))
 
                 for candidate in candidates:
+                    logger.debug(
+                        "Candidate pre-emit | desk=%s symbol=%s dir=%s strategy=%s",
+                        desk_id, candidate.get("symbol"), candidate.get("direction"), candidate.get("strategy"),
+                    )
                     payload = DeskScanner.build_signal_payload(candidate)
                     if not await self.dedup.is_duplicate(payload):
                         await self._emit_signal(payload)
@@ -337,7 +342,7 @@ class SignalEngine:
         """Push signal to Redis Stream in the format worker expects."""
         try:
             stream_payload = orjson.dumps(signal)
-            await self.redis.xadd(STREAM_KEY, {"payload": stream_payload})
+            message_id = await self.redis.xadd(STREAM_KEY, {"payload": stream_payload})
             self._signal_count += 1
 
             logger.info(
@@ -346,7 +351,8 @@ class SignalEngine:
                 f"{signal['alert_type']} | "
                 f"Confluence: {signal.get('confluence_score', '?'):.1f} | "
                 f"Strategy: {signal.get('strategy_id', '?')} | "
-                f"Desks: {signal.get('desks_matched', [])}"
+                f"Desks: {signal.get('desks_matched', [])} | "
+                f"Redis={STREAM_KEY}:{message_id} | payload_bytes={len(stream_payload)}"
             )
         except Exception as e:
             logger.error(f"Failed to emit signal: {e}")

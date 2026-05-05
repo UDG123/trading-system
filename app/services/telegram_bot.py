@@ -149,11 +149,12 @@ class TelegramBot:
                 json={"chat_id": target, "text": text, "disable_web_page_preview": True},
             )
             if resp.status_code == 200:
+                logger.info("Telegram send success | chat_id=%s | chars=%s", target, len(text))
                 return True
-            logger.error(f"Telegram API error: {resp.status_code} {resp.text[:200]}")
+            logger.error(f"Telegram API error | chat_id={target} | {resp.status_code} {resp.text[:200]}")
             return False
         except Exception as e:
-            logger.error(f"Telegram send failed: {e}")
+            logger.error(f"Telegram send failed | chat_id={target} | {e}")
             return False
 
     async def _send_to_desk(self, desk_id, text):

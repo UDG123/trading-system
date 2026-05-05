@@ -57,15 +57,18 @@ class DeskScanner:
 
         for symbol in symbols:
             if not is_valid_trading_hour(symbol, desk_id, now_utc):
+                logger.debug("SCAN REJECT | %s %s | market_hours", desk_id, symbol)
                 continue
 
             df = self._cm.get_dataframe(symbol, entry_tf)
             if df is None or len(df) < 50:
+                logger.debug("SCAN REJECT | %s %s | insufficient_data len=%s", desk_id, symbol, 0 if df is None else len(df))
                 continue
 
             regime = regime_cache.get(symbol)
             indicators = self._calc.compute(df, symbol, entry_tf, regime=regime)
             if not indicators:
+                logger.debug("SCAN REJECT | %s %s | indicators_empty", desk_id, symbol)
                 continue
 
             if not regime:
@@ -104,6 +107,7 @@ class DeskScanner:
                     sl_dist = abs(price - result["sl"])
                     tp_dist = abs(result["tp1"] - price)
                     if sl_dist > 0 and tp_dist / sl_dist < 1.5:
+                        logger.debug("SCAN REJECT | %s %s | rr_too_low rr=%.2f", desk_id, symbol, tp_dist / sl_dist)
                         continue
 
                 result.update({
@@ -129,6 +133,10 @@ class DeskScanner:
                 self._signal_count += 1
 
         self._scan_count += 1
+        logger.info(
+            "SCAN SUMMARY | %s | symbols=%s | candidates=%s",
+            desk_id, len(symbols), len(candidates),
+        )
         if candidates:
             logger.info(
                 "SCAN | %s | %s candidates from %s symbols | %s",

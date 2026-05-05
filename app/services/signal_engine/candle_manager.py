@@ -117,7 +117,10 @@ class CandleManager:
                     if df is not None and len(df) > 0:
                         self._frames[(symbol, tf)] = df
                         loaded_pairs += 1
-                        logger.debug("Backfill DB | %s %s | %s bars", symbol, tf, len(df))
+                        logger.info(
+                            "Backfill DB | %s %s | bars=%s | first=%s | last=%s",
+                            symbol, tf, len(df), df["time"].iloc[0], df["time"].iloc[-1],
+                        )
                         continue
 
                     bars = await self._fetch_bars(symbol, tf, outputsize=LOOKBACK_BARS.get(tf, 200))
@@ -182,6 +185,12 @@ class CandleManager:
             )
             self._rate_limiter.record_request()
             data = resp.json()
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Malformed TwelveData response | %s %s | type=%s",
+                    symbol, timeframe, type(data).__name__,
+                )
+                return []
 
             if data.get("status") == "error" or data.get("code") in (400, 401, 403, 429):
                 logger.warning("TwelveData error for %s %s: %s", symbol, timeframe, data.get("message", data))
@@ -206,9 +215,15 @@ class CandleManager:
                         "provider": "twelvedata",
                     })
                 except (ValueError, KeyError, TypeError):
+                    logger.warning("Malformed bar skipped | %s %s | row=%s", symbol, timeframe, v)
                     continue
             if not bars:
                 logger.warning("TwelveData parsed 0 bars for %s %s from %s values", symbol, timeframe, len(values))
+            else:
+                logger.info(
+                    "Fetched bars | %s %s | count=%s | first=%s | last=%s",
+                    symbol, timeframe, len(bars), bars[0]["time"], bars[-1]["time"],
+                )
             return bars
         except Exception as e:
             logger.debug("Fetch failed for %s %s: %s", symbol, timeframe, e)
@@ -272,6 +287,16 @@ class CandleManager:
             df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            if df.empty:
+                logger.warning("DB load empty after cleanup | %s %s", symbol, timeframe)
+                return None
+            nan_cols = df[["open", "high", "low", "close", "volume"]].isna().sum().to_dict()
+            if any(v > 0 for v in nan_cols.values()):
+                logger.warning("DB candle NaNs detected | %s %s | %s", symbol, timeframe, nan_cols)
+                df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+            if not df["time"].is_monotonic_increasing:
+                logger.warning("DB candle ordering corrected | %s %s", symbol, timeframe)
+                df = df.sort_values("time").reset_index(drop=True)
             return df
         except Exception as e:
             logger.debug("DB load failed for %s %s: %s", symbol, timeframe, e)
