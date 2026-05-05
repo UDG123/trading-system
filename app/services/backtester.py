@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.models.shadow_signal import ShadowSignal
 from app.models.sim_models import SimProfile
 from app.config import get_pip_info, DESKS
+from app.services.simulation.fill_model import estimate_fill, resolve_same_bar_exit
 
 logger = logging.getLogger("TradingSystem.Backtester")
 
@@ -104,7 +105,7 @@ class SignalReplayBacktester:
 
                     # Walk forward to find exit
                     exit_result = self._walk_forward_exits(
-                        db, signal, result, hist_price
+                        db, signal, result, hist_price, profile.initial_balance
                     )
 
                     if exit_result:
@@ -143,6 +144,7 @@ class SignalReplayBacktester:
         signal: ShadowSignal,
         trade_result: Dict,
         entry_price: float,
+        profile_initial_balance: float = 100000.0,
     ) -> Optional[Dict]:
         """Walk forward through OHLCV to find exit."""
         desk_id = signal.desk_id or "DESK2_INTRADAY"
@@ -163,6 +165,10 @@ class SignalReplayBacktester:
         bars = self._get_ohlcv_bars(db, signal.symbol, signal.created_at, max_bars)
         if not bars:
             return None
+
+        commission_per_trade = 0.5
+        simulated_latency_ms = 150
+        simulated_slippage_bps = 1.5
 
         max_fav = 0.0
         max_adv = 0.0
@@ -186,6 +192,21 @@ class SignalReplayBacktester:
 
             max_fav = max(max_fav, fav)
             max_adv = max(max_adv, adv)
+
+                        # Conservative same-candle resolution for TP/SL ambiguity
+            if sl and tp1:
+                if direction == "LONG":
+                    same = resolve_same_bar_exit(direction, l, h, sl, tp1)
+                else:
+                    same = resolve_same_bar_exit(direction, l, h, tp1, sl)
+                if same == "SL":
+                    exit_price = sl
+                    exit_reason = "SL_HIT_SAME_BAR"
+                    break
+                if same == "TP":
+                    exit_price = tp1
+                    exit_reason = "TP1_HIT_SAME_BAR"
+                    break
 
             # Check SL
             if sl:
@@ -211,8 +232,15 @@ class SignalReplayBacktester:
 
         # Timeout
         if exit_price is None and bars:
-            exit_price = float(bars[-1][4])  # last close
-            exit_reason = "TIME_EXIT"
+            # pessimistic timeout exit: long exits at bid, short exits at ask
+            last_close = float(bars[-1][4])
+            synthetic_spread = max(last_close * 0.0002, pip_size * 0.5)
+            bid = last_close - synthetic_spread / 2
+            ask = last_close + synthetic_spread / 2
+            side = "SELL" if direction == "LONG" else "BUY"
+            fill = estimate_fill(side=side, bid=bid, ask=ask, latency_ms=simulated_latency_ms, slippage_bps=simulated_slippage_bps)
+            exit_price = fill.fill_price
+            exit_reason = "TIMEOUT_EXIT"
 
         if exit_price is None:
             return None
@@ -223,7 +251,9 @@ class SignalReplayBacktester:
             pnl_pips = (entry_price - exit_price) / pip_size
 
         lot_size = trade_result.get("lot_size", 0.01)
-        pnl_dollars = round(pnl_pips * pip_value * lot_size, 2)
+        gross_pnl = pnl_pips * pip_value * lot_size
+        spread_cost = max((simulated_slippage_bps / 10000) * entry_price * pip_value * lot_size, 0)
+        pnl_dollars = round(gross_pnl - spread_cost - commission_per_trade, 2)
         hold_minutes = hold_bars * 1.0
 
         return {
@@ -238,6 +268,7 @@ class SignalReplayBacktester:
             "hold_minutes": round(hold_minutes, 1),
             "mfe": round(max_fav, 2),
             "mae": round(max_adv, 2),
+            "r_multiple": round((pnl_pips / max_adv), 2) if max_adv > 0 else 0,
             "lot_size": lot_size,
             "session": signal.active_session,
             "hour_utc": signal.created_at.hour if signal.created_at else 0,
@@ -262,6 +293,7 @@ class SignalReplayBacktester:
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
         expectancy = sum(pnl_pips_list) / total if total > 0 else 0
+        expectancy_dollars = sum(pnl_dollars_list) / total if total > 0 else 0
 
         # Max consecutive
         max_consec_wins = max_consec_losses = 0
@@ -314,7 +346,11 @@ class SignalReplayBacktester:
             s["pnl"] = round(s["pnl"], 1)
 
         avg_mfe = sum(t.get("mfe", 0) for t in trades) / total if total > 0 else 0
+        avg_r_multiple = sum(t.get("r_multiple", 0) for t in trades) / total if total > 0 else 0
         avg_mae = sum(t.get("mae", 0) for t in trades) / total if total > 0 else 0
+        avg_win_hold = sum(t["hold_minutes"] for t in wins) / len(wins) if wins else 0
+        avg_loss_hold = sum(t["hold_minutes"] for t in losses) / len(losses) if losses else 0
+        calmar = ((sum(pnl_dollars_list)/100000.0)*100)/(max_dd_pct if max_dd_pct>0 else 1e-9) if total>0 else 0
 
         return {
             "status": "completed",
@@ -324,16 +360,22 @@ class SignalReplayBacktester:
             "win_rate": round(win_rate, 1),
             "profit_factor": round(profit_factor, 2),
             "expectancy_pips": round(expectancy, 2),
+            "expectancy_dollars": round(expectancy_dollars, 2),
             "total_pnl_pips": round(sum(pnl_pips_list), 1),
             "total_pnl_dollars": round(sum(pnl_dollars_list), 2),
             "max_consecutive_wins": max_consec_wins,
             "max_consecutive_losses": max_consec_losses,
             "sharpe_ratio": round(sharpe, 2),
             "sortino_ratio": round(sortino, 2),
+            "calmar_ratio": round(calmar, 2),
             "max_drawdown_dollars": round(max_dd, 2),
             "max_drawdown_pct": round(max_dd_pct, 2),
             "avg_mfe_pips": round(avg_mfe, 2),
             "avg_mae_pips": round(avg_mae, 2),
+            "avg_r_multiple": round(avg_r_multiple, 2),
+            "avg_win_hold_minutes": round(avg_win_hold,1),
+            "avg_loss_hold_minutes": round(avg_loss_hold,1),
+            "hold_time_win_loss_delta": round(avg_win_hold-avg_loss_hold,1),
             "mfe_mae_ratio": round(avg_mfe / avg_mae, 2) if avg_mae > 0 else 0,
             "avg_hold_minutes": round(sum(t["hold_minutes"] for t in trades) / total, 1),
             "best_trade_pips": round(max(pnl_pips_list), 2),

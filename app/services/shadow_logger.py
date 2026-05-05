@@ -89,6 +89,7 @@ class ShadowLogger:
                 break
 
         # Build feature vector
+        payload.setdefault("desk_id", desk_id or payload.get("desk_id"))
         feature_vector = self.compute_feature_vector(
             payload, enrichment, ml_result, consensus
         )
@@ -145,7 +146,7 @@ class ShadowLogger:
             # Latency
             webhook_latency_ms=payload.get("webhook_latency_ms"),
             # Raw data
-            raw_payload=payload,
+            raw_payload={**payload, "rejection_reason": decision.get("rejection_reason"), "blocked_layer": decision.get("blocked_layer"), "would_have_simulated": decision.get("would_have_simulated", False)},
             enrichment_data=enrichment,
             feature_vector=feature_vector,
             desks_matched=payload.get("desks_matched"),
@@ -332,6 +333,14 @@ class ShadowLogger:
             "active_session": enrichment.get("active_session"),
             "kill_zone_type": enrichment.get("kill_zone_type"),
             "volatility_regime": enrichment.get("volatility_regime"),
+            "desk_mode": signal_data.get("desk_mode"),
+            "strategy_mode": signal_data.get("strategy_mode"),
+            "bias_alignment": signal_data.get("bias_alignment"),
+            "bias_action": signal_data.get("bias_action"),
+            "bias_size_mult": float(signal_data.get("bias_size_mult", 1.0) or 1.0),
+            "is_bias_aligned": signal_data.get("bias_alignment") == "ALIGNED",
+            "is_bias_counter": signal_data.get("bias_alignment") == "COUNTER",
+            "is_bias_blocked": signal_data.get("bias_action") == "BLOCKED" or bool(signal_data.get("blocked_by_bias")),
         }
 
         # ── v7.1 High-value ML features ──
