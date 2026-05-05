@@ -37,4 +37,8 @@ class DedupFilter:
                 f"{signal.get('alert_type')} {signal.get('direction')}"
             )
             return True
+        logger.debug(
+            "DEDUP PASS | %s %s %s",
+            signal.get("symbol_normalized"), signal.get("alert_type"), signal.get("direction"),
+        )
         return False
