@@ -164,6 +164,10 @@ class DeskScanner:
             desks_matched.append(desk_id)
 
         confidence = float(candidate.get("confidence", 0.5) or 0.5)
+        desk_cfg = DESKS.get(desk_id, {})
+        desk_role = candidate.get("desk_role") or desk_cfg.get("role")
+        desk_mode = candidate.get("desk_mode") or desk_role
+        strategy_mode = candidate.get("strategy_mode") or candidate.get("strategy") or candidate.get("stack_id") or "unknown"
         return {
             "symbol": symbol,
             "symbol_normalized": symbol,
@@ -181,7 +185,7 @@ class DeskScanner:
             "desks_matched": desks_matched,
             "webhook_latency_ms": 0,
             "time": str(int(time.time() * 1000)),
-            "source": "python_engine",
+            "source": "internal_engine",
             "confluence_score": confidence * 10,
             "strategy_id": candidate.get("strategy", candidate.get("strategy_mode", "unknown")),
             "quality_score": confidence * 100,
@@ -189,14 +193,14 @@ class DeskScanner:
             "quality_size_mult": 1.0 if confidence > 0.7 else 0.5,
             "regime": candidate.get("regime", "UNKNOWN"),
             "stack_id": candidate.get("stack_id", "?"),
-            "desk_mode": candidate.get("desk_mode"),
-            "desk_role": candidate.get("desk_role"),
-            "strategy_mode": candidate.get("strategy_mode"),
-            "mode_reason": candidate.get("mode_reason"),
+            "desk_mode": desk_mode,
+            "desk_role": desk_role,
+            "strategy_mode": strategy_mode,
+            "mode_reason": candidate.get("mode_reason") or "internal_engine_scan",
             "quality_hints": candidate.get("quality_hints", []),
-            "cross_desk_bias": candidate.get("cross_desk_bias"),
-            "bias_alignment": candidate.get("bias_alignment"),
-            "bias_action": candidate.get("bias_action"),
+            "cross_desk_bias": candidate.get("cross_desk_bias") or "NEUTRAL",
+            "bias_alignment": candidate.get("bias_alignment") or "NEUTRAL",
+            "bias_action": candidate.get("bias_action") or "PASS",
             "bias_size_mult": candidate.get("bias_size_mult", 1.0),
             "blocked_by_bias": bool(candidate.get("blocked_by_bias", False)),
         }

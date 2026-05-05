@@ -16,7 +16,7 @@ import orjson
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import ORJSONResponse
 
-from app.config import WEBHOOK_SECRET, SYMBOL_ALIASES, get_desk_for_symbol
+from app.config import ENABLE_TRADINGVIEW_WEBHOOK, WEBHOOK_SECRET, SYMBOL_ALIASES, get_desk_for_symbol
 
 logger = logging.getLogger("TradingSystem.Webhook")
 router = APIRouter()
@@ -223,7 +223,7 @@ def _compute_dedup_hash(payload: dict) -> str:
 @router.post("/webhook/{path_secret}", response_class=ORJSONResponse, status_code=202)
 async def webhook_path_auth(path_secret: str, request: Request):
     """LuxAlgo alerts — secret in URL path since alert() overrides message body."""
-    if path_secret != WEBHOOK_SECRET:
+    if not WEBHOOK_SECRET or path_secret != WEBHOOK_SECRET:
         logger.warning(f"Path auth failed from {request.client.host}")
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
     return await _ingest(request, authed=True)
@@ -244,6 +244,8 @@ async def _ingest(request: Request, authed: bool = False) -> dict:
     Validate → Dedup → XADD → 202 Accepted.
     No DB writes. No background tasks. No broker calls.
     """
+    if not ENABLE_TRADINGVIEW_WEBHOOK:
+        return {"status": "disabled", "message": "TradingView webhook support is disabled; internal engine is primary."}
     arrival_ns = time.monotonic_ns()
     redis = _get_redis()
 
@@ -272,7 +274,7 @@ async def _ingest(request: Request, authed: bool = False) -> dict:
     if not authed:
         secret = payload.get("secret", "")
         q_secret = request.query_params.get("secret", "")
-        if secret != WEBHOOK_SECRET and q_secret != WEBHOOK_SECRET:
+        if not WEBHOOK_SECRET or (secret != WEBHOOK_SECRET and q_secret != WEBHOOK_SECRET):
             logger.warning(f"Auth failed from {request.client.host}")
             raise HTTPException(status_code=401, detail="Invalid webhook secret")
 

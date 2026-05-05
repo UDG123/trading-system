@@ -35,3 +35,9 @@ def consume_group(stream: str, group: str, consumer: str, count: int = 10, block
 
 def ack_event(stream: str, group: str, message_id: str):
     return get_redis().xack(stream, group, message_id)
+
+
+async def publish_signal(redis_client, payload: dict) -> str:
+    """Publish an internal-engine signal using the worker-compatible stream format."""
+    body = json.dumps(payload, default=str)
+    return await redis_client.xadd("oniquant_alerts", {"payload": body})
