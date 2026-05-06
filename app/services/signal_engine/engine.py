@@ -31,6 +31,7 @@ STREAM_KEY = "oniquant_alerts"
 ENGINE_DAILY_CREDIT_BUDGET = int(os.getenv("ENGINE_DAILY_CREDITS", "500"))
 ENGINE_PER_MINUTE_LIMIT = int(os.getenv("ENGINE_PER_MINUTE_LIMIT", "7"))
 TWELVEDATA_BACKFILL_DELAY_SECONDS = float(os.getenv("TWELVEDATA_BACKFILL_DELAY_SECONDS", "8.75"))
+INITIAL_BACKFILL_TIMEOUT_SECONDS = int(os.getenv("INITIAL_BACKFILL_TIMEOUT_SECONDS", "90"))
 _raw_td_only = os.getenv("TD_ONLY_SYMBOLS", "WTIUSD")
 TD_ONLY_SYMBOLS = {s.strip().upper() for s in _raw_td_only.split(",") if s.strip()}
 
@@ -58,7 +59,6 @@ def _resolve_symbols(desk_spec: str) -> List[str]:
 
 
 def _json_safe(value: Any) -> Any:
-    """Convert numpy/pandas/scalar objects into Redis/orjson-safe primitives."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (datetime, date)):
@@ -117,7 +117,20 @@ class SignalEngine:
             all_symbols = CandleManager.get_all_symbols()
             all_tfs = CandleManager.get_required_timeframes()
             logger.info(f"Backfilling {len(all_symbols)} symbols × {len(all_tfs)} timeframes...")
-            await self.candle_manager.initial_backfill(all_symbols, all_tfs)
+
+            backfill_task = asyncio.create_task(
+                self.candle_manager.initial_backfill(all_symbols, all_tfs),
+                name="initial_backfill",
+            )
+            self._poll_tasks.append(backfill_task)
+            try:
+                await asyncio.wait_for(asyncio.shield(backfill_task), timeout=INITIAL_BACKFILL_TIMEOUT_SECONDS)
+                logger.info("Initial backfill completed before scanner startup")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Initial backfill still running after %ss; starting streams/scanners with partial data",
+                    INITIAL_BACKFILL_TIMEOUT_SECONDS,
+                )
 
             try:
                 from app.services.data_providers.kraken_ws import KrakenOHLCStream
