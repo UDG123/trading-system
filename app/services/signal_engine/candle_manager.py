@@ -1,10 +1,10 @@
 """
 OHLCV Candle Manager
-Fetches candles from TwelveData, stores in PostgreSQL, maintains rolling
-DataFrames in memory for fast indicator computation.
-Reuses symbol mappings from ohlcv_ingester.
+Cache-first candle manager. Loads from DB first, then free public backfill,
+then optionally TwelveData when ENABLE_TWELVEDATA_BACKFILL=true.
 """
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import DESKS
+from app.services.data_providers.free_backfill import fetch_free_bars
 from app.services.ohlcv_ingester import TD_MAP, CRYPTO_SYMBOLS, EQUITY_SYMBOLS
 from app.services.signal_engine.rate_limiter import RateLimiter
 
@@ -40,6 +41,19 @@ LOOKBACK_BARS = {
 }
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _td_allowed_symbol(symbol: str) -> bool:
+    raw = os.getenv("TD_ONLY_SYMBOLS", "")
+    allowed = {part.strip().upper() for part in raw.split(",") if part.strip()}
+    return symbol.upper() in allowed if allowed else False
+
+
 class CandleManager:
     """Manages OHLCV data for signal generation."""
 
@@ -62,7 +76,6 @@ class CandleManager:
 
     def _get_api_key(self) -> str:
         if self._api_key is None:
-            import os
             self._api_key = os.getenv("TWELVEDATA_API_KEY", "")
         return self._api_key
 
@@ -94,6 +107,7 @@ class CandleManager:
         new_df = pd.DataFrame(normalized)
         new_df["time"] = pd.to_datetime(new_df["time"], utc=True, errors="coerce")
         new_df = new_df.dropna(subset=["time"])
+        new_df = new_df.dropna(subset=["open", "high", "low", "close"])
         new_df = new_df.sort_values("time").drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
         for col in ["open", "high", "low", "close", "volume"]:
             new_df[col] = pd.to_numeric(new_df[col], errors="coerce")
@@ -128,12 +142,15 @@ class CandleManager:
                         count = self._store_and_cache(db, symbol, tf, bars)
                         if count > 0 and self._frames.get((symbol, tf)) is not None:
                             loaded_pairs += 1
-                        logger.info("Backfill API | %s %s | %s bars fetched/cached", symbol, tf, len(bars))
+                        logger.info("Backfill provider | %s %s | %s bars fetched/cached", symbol, tf, len(bars))
+                    else:
+                        logger.info("DATA MISSING | %s %s | no provider returned bars", symbol, tf)
         finally:
             if db is not None:
                 db.close()
 
         logger.info("Backfill complete | %s symbol-TF pairs loaded", loaded_pairs)
+        self.log_coverage(symbols, timeframes)
 
     async def fetch_latest(self, symbol: str, timeframe: str) -> int:
         bars = await self._fetch_bars(symbol, timeframe, outputsize=5)
@@ -149,6 +166,24 @@ class CandleManager:
         return new_count
 
     async def _fetch_bars(self, symbol: str, timeframe: str, outputsize: int = 200) -> List[Dict]:
+        # Free/public backfill is now the default. TwelveData is opt-in only.
+        use_td = _env_bool("ENABLE_TWELVEDATA_BACKFILL", False)
+        if not use_td:
+            bars = await fetch_free_bars(symbol, timeframe, outputsize)
+            if bars:
+                logger.info("FREE DATA USED | %s %s | %s bars", symbol, timeframe, len(bars))
+                return bars
+            logger.info("FREE DATA EMPTY | %s %s", symbol, timeframe)
+            return []
+
+        if not _td_allowed_symbol(symbol):
+            bars = await fetch_free_bars(symbol, timeframe, outputsize)
+            if bars:
+                logger.info("FREE DATA USED | %s %s | %s bars", symbol, timeframe, len(bars))
+                return bars
+            logger.info("TwelveData skipped for %s %s (not in TD_ONLY_SYMBOLS)", symbol, timeframe)
+            return []
+
         if not self._rate_limiter.can_request():
             wait = self._rate_limiter.seconds_until_minute_slot()
             logger.debug("Rate limited, waiting %.1fs for %s %s", wait, symbol, timeframe)
@@ -174,66 +209,43 @@ class CandleManager:
         try:
             resp = await self._client.get(
                 "https://api.twelvedata.com/time_series",
-                params={
-                    "symbol": td_symbol,
-                    "interval": td_interval,
-                    "outputsize": outputsize,
-                    "apikey": self._get_api_key(),
-                    "format": "JSON",
-                    "dp": 5,
-                },
+                params={"symbol": td_symbol, "interval": td_interval, "outputsize": outputsize, "apikey": self._get_api_key(), "format": "JSON", "dp": 5},
             )
             self._rate_limiter.record_request()
             data = resp.json()
             if not isinstance(data, dict):
-                logger.warning(
-                    "Malformed TwelveData response | %s %s | type=%s",
-                    symbol, timeframe, type(data).__name__,
-                )
+                logger.warning("Malformed TwelveData response | %s %s | type=%s", symbol, timeframe, type(data).__name__)
                 return []
-
             if data.get("status") == "error" or data.get("code") in (400, 401, 403, 429):
                 logger.warning("TwelveData error for %s %s: %s", symbol, timeframe, data.get("message", data))
+                logger.warning("NO DATA AVAILABLE | %s %s", symbol, timeframe)
                 return []
-
             values = data.get("values", [])
             if not values:
                 logger.debug("TwelveData empty values for %s %s | keys=%s", symbol, timeframe, list(data.keys()))
+                logger.warning("NO DATA AVAILABLE | %s %s", symbol, timeframe)
                 return []
-
             bars = []
-            # TwelveData returns newest-first. Cache oldest-first.
             for v in reversed(values):
                 try:
-                    bars.append({
-                        "time": v["datetime"],
-                        "open": float(v["open"]),
-                        "high": float(v["high"]),
-                        "low": float(v["low"]),
-                        "close": float(v["close"]),
-                        "volume": float(v.get("volume", 0) or 0),
-                        "provider": "twelvedata",
-                    })
+                    bars.append({"time": v["datetime"], "open": float(v["open"]), "high": float(v["high"]), "low": float(v["low"]), "close": float(v["close"]), "volume": float(v.get("volume", 0) or 0), "provider": "twelvedata"})
                 except (ValueError, KeyError, TypeError):
                     logger.warning("Malformed bar skipped | %s %s | row=%s", symbol, timeframe, v)
-                    continue
-            if not bars:
-                logger.warning("TwelveData parsed 0 bars for %s %s from %s values", symbol, timeframe, len(values))
+            if bars:
+                logger.info("Fetched bars | %s %s | count=%s | first=%s | last=%s", symbol, timeframe, len(bars), bars[0]["time"], bars[-1]["time"])
             else:
-                logger.info(
-                    "Fetched bars | %s %s | count=%s | first=%s | last=%s",
-                    symbol, timeframe, len(bars), bars[0]["time"], bars[-1]["time"],
-                )
+                logger.warning("TwelveData parsed 0 bars for %s %s from %s values", symbol, timeframe, len(values))
+                logger.warning("NO DATA AVAILABLE | %s %s", symbol, timeframe)
             return bars
         except Exception as e:
             logger.debug("Fetch failed for %s %s: %s", symbol, timeframe, e)
+            logger.warning("NO DATA AVAILABLE | %s %s", symbol, timeframe)
             return []
 
     def _store_and_cache(self, db: Session, symbol: str, timeframe: str, bars: List[Dict]) -> int:
         table = TF_TO_TABLE.get(timeframe)
         if not table or not bars:
             return 0
-
         inserted = 0
         if db is not None:
             try:
@@ -244,15 +256,7 @@ class CandleManager:
                             VALUES (:time, :symbol, :open, :high, :low, :close, :volume)
                             ON CONFLICT (time, symbol) DO NOTHING
                         """),
-                        {
-                            "time": bar["time"],
-                            "symbol": symbol,
-                            "open": bar["open"],
-                            "high": bar["high"],
-                            "low": bar["low"],
-                            "close": bar["close"],
-                            "volume": bar.get("volume", 0),
-                        },
+                        {"time": bar["time"], "symbol": symbol, "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"], "volume": bar.get("volume", 0)},
                     )
                     if getattr(result, "rowcount", 0) > 0:
                         inserted += 1
@@ -260,7 +264,6 @@ class CandleManager:
             except Exception as e:
                 db.rollback()
                 logger.warning("DB insert failed for %s %s (%s): %s; continuing with memory cache", symbol, timeframe, table, e)
-
         cached = self.update_dataframe(symbol, timeframe, bars)
         return max(inserted, cached)
 
@@ -271,13 +274,7 @@ class CandleManager:
         max_bars = LOOKBACK_BARS.get(timeframe, 200)
         try:
             result = db.execute(
-                text(f"""
-                    SELECT time, open, high, low, close, volume
-                    FROM {table}
-                    WHERE symbol = :symbol
-                    ORDER BY time DESC
-                    LIMIT :limit
-                """),
+                text(f"SELECT time, open, high, low, close, volume FROM {table} WHERE symbol = :symbol ORDER BY time DESC LIMIT :limit"),
                 {"symbol": symbol, "limit": max_bars},
             ).fetchall()
             if not result:
@@ -287,20 +284,28 @@ class CandleManager:
             df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
             if df.empty:
                 logger.warning("DB load empty after cleanup | %s %s", symbol, timeframe)
                 return None
-            nan_cols = df[["open", "high", "low", "close", "volume"]].isna().sum().to_dict()
-            if any(v > 0 for v in nan_cols.values()):
-                logger.warning("DB candle NaNs detected | %s %s | %s", symbol, timeframe, nan_cols)
-                df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
             if not df["time"].is_monotonic_increasing:
-                logger.warning("DB candle ordering corrected | %s %s", symbol, timeframe)
                 df = df.sort_values("time").reset_index(drop=True)
             return df
         except Exception as e:
             logger.debug("DB load failed for %s %s: %s", symbol, timeframe, e)
             return None
+
+    def log_coverage(self, symbols: List[str], timeframes: List[str]) -> None:
+        for symbol in symbols:
+            missing = []
+            for tf in timeframes:
+                df = self.get_dataframe(symbol, tf)
+                if df is None or len(df) == 0:
+                    missing.append(tf)
+                    continue
+                logger.info("DATA COVERAGE | %s | %s | bars=%s | first=%s | last=%s", symbol, tf, len(df), df["time"].iloc[0], df["time"].iloc[-1])
+            if missing:
+                logger.info("DATA MISSING | %s | missing_timeframes=%s", symbol, missing)
 
     @staticmethod
     def get_all_symbols() -> List[str]:
@@ -312,9 +317,8 @@ class CandleManager:
     @staticmethod
     def get_desk_timeframes(desk_id: str) -> List[str]:
         desk = DESKS.get(desk_id, {})
-        tfs = desk.get("timeframes", {})
         result = set()
-        for tf_str in tfs.values():
+        for tf_str in desk.get("timeframes", {}).values():
             for t in tf_str.split(","):
                 t = t.strip().upper()
                 if t in TF_TO_TD_INTERVAL:
