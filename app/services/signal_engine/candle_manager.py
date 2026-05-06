@@ -166,7 +166,6 @@ class CandleManager:
         return new_count
 
     async def _fetch_bars(self, symbol: str, timeframe: str, outputsize: int = 200) -> List[Dict]:
-        # Free/public backfill is now the default. TwelveData is opt-in only.
         use_td = _env_bool("ENABLE_TWELVEDATA_BACKFILL", False)
         if not use_td:
             bars = await fetch_free_bars(symbol, timeframe, outputsize)
@@ -198,10 +197,7 @@ class CandleManager:
         if not td_symbol and symbol in EQUITY_SYMBOLS:
             td_symbol = symbol
         if not td_symbol and symbol in CRYPTO_SYMBOLS:
-            td_symbol = {
-                "BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD",
-                "SOLUSD": "SOL/USD", "XRPUSD": "XRP/USD", "LINKUSD": "LINK/USD",
-            }.get(symbol)
+            td_symbol = {"BTCUSD": "BTC/USD", "ETHUSD": "ETH/USD", "SOLUSD": "SOL/USD", "XRPUSD": "XRP/USD", "LINKUSD": "LINK/USD"}.get(symbol)
         if not td_symbol:
             logger.warning("No TwelveData mapping for %s", symbol)
             return []
@@ -246,20 +242,32 @@ class CandleManager:
         table = TF_TO_TABLE.get(timeframe)
         if not table or not bars:
             return 0
+
+        # Railway/Postgres proof-of-concept mode: avoid slow/fragile bulk inserts during startup.
+        # Memory cache is enough for scanners and prevents aborted transactions from poisoning the whole backfill.
+        if _env_bool("DISABLE_BACKFILL_DB_WRITES", True):
+            cached = self.update_dataframe(symbol, timeframe, bars)
+            logger.info("Memory-only cache | %s %s | bars=%s", symbol, timeframe, cached)
+            return cached
+
         inserted = 0
         if db is not None:
             try:
                 for bar in bars:
-                    result = db.execute(
-                        text(f"""
-                            INSERT INTO {table} (time, symbol, open, high, low, close, volume)
-                            VALUES (:time, :symbol, :open, :high, :low, :close, :volume)
-                            ON CONFLICT (time, symbol) DO NOTHING
-                        """),
-                        {"time": bar["time"], "symbol": symbol, "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"], "volume": bar.get("volume", 0)},
-                    )
-                    if getattr(result, "rowcount", 0) > 0:
-                        inserted += 1
+                    try:
+                        result = db.execute(
+                            text(f"""
+                                INSERT INTO {table} (time, symbol, open, high, low, close, volume)
+                                VALUES (:time, :symbol, :open, :high, :low, :close, :volume)
+                                ON CONFLICT (time, symbol) DO NOTHING
+                            """),
+                            {"time": bar["time"], "symbol": symbol, "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"], "volume": bar.get("volume", 0)},
+                        )
+                        if getattr(result, "rowcount", 0) > 0:
+                            inserted += 1
+                    except Exception as row_exc:
+                        db.rollback()
+                        logger.debug("DB row insert skipped | %s %s | %s", symbol, timeframe, row_exc)
                 db.commit()
             except Exception as e:
                 db.rollback()
