@@ -25,6 +25,25 @@ TF_TO_TD_INTERVAL = {"1M": "1min", "5M": "5min", "15M": "15min", "1H": "1h", "4H
 TF_TO_TABLE = {"1M": "ohlcv_1m", "5M": "ohlcv_5m", "15M": "ohlcv_15m", "1H": "ohlcv_1h", "4H": "ohlcv_4h", "D": "ohlcv_1d", "W": "ohlcv_1w"}
 LOOKBACK_BARS = {"1M": 2000, "5M": 2000, "15M": 2000, "1H": 2000, "4H": 500, "D": 500, "W": 104}
 
+# Backfill order matters when scanners start while backfill is still running.
+# Prioritize the desks the user cares about before slow alphabetical symbols.
+SYMBOL_BACKFILL_PRIORITY = {
+    "XAUUSD": 0,
+    "EURUSD": 1,
+    "GBPUSD": 2,
+    "USDJPY": 3,
+    "USDCHF": 4,
+    "AUDUSD": 5,
+    "BTCUSD": 6,
+    "ETHUSD": 7,
+    "AAPL": 8,
+    "MSFT": 9,
+    "NVDA": 10,
+    "TSLA": 11,
+    "NAS100": 12,
+    "US30": 13,
+}
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -53,6 +72,10 @@ def _td_allowed_symbol(symbol: str) -> bool:
     return symbol.upper() in allowed if allowed else False
 
 
+def _prioritize_symbols(symbols: List[str]) -> List[str]:
+    return sorted(symbols, key=lambda s: (SYMBOL_BACKFILL_PRIORITY.get(str(s).upper(), 999), str(s).upper()))
+
+
 class CandleManager:
     def __init__(self, db_session_factory=None, rate_limiter: RateLimiter = None):
         if db_session_factory is None:
@@ -68,7 +91,12 @@ class CandleManager:
         self._frames: Dict[tuple, pd.DataFrame] = {}
         self._last_fetch: Dict[tuple, datetime] = {}
         self._free_backfill_timeout = _env_float("FREE_BACKFILL_TIMEOUT_SECONDS", 8.0)
-        self._max_initial_pairs = _env_int("MAX_INITIAL_BACKFILL_PAIRS", 35)
+
+        # The old env value MAX_INITIAL_BACKFILL_PAIRS=20 starved most desks and
+        # left XAUUSD/EURUSD/GBPUSD completely empty. Enforce a safe floor unless
+        # explicitly disabled for debugging.
+        requested_cap = _env_int("MAX_INITIAL_BACKFILL_PAIRS", 98)
+        self._max_initial_pairs = requested_cap if _env_bool("ALLOW_LOW_BACKFILL_CAP", False) else max(requested_cap, 98)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -114,6 +142,8 @@ class CandleManager:
         db = self._db_factory()
         loaded_pairs = 0
         attempted_pairs = 0
+        symbols = _prioritize_symbols(symbols)
+        logger.info("Initial backfill prioritized order | first_symbols=%s | cap=%s", symbols[:8], self._max_initial_pairs)
         try:
             for symbol in symbols:
                 for tf in timeframes:
