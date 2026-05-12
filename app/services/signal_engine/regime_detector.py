@@ -67,6 +67,16 @@ def garman_klass_vol(
 class HMMRegimeDetector:
     """Per-symbol 3-state Gaussian HMM regime classifier."""
 
+    @staticmethod
+    def _probability_size_adjustment(state_probs: Dict[str, float]) -> float:
+        trend_prob = float(state_probs.get("TRENDING_UP", 0)) + float(state_probs.get("TRENDING_DOWN", 0))
+        range_prob = float(state_probs.get("RANGING", 0))
+        if trend_prob >= 0.7:
+            return 1.15
+        if range_prob >= 0.7:
+            return 0.8
+        return 1.0
+
     def __init__(self, redis_pool=None):
         self.redis = redis_pool
         self._prev_regimes: Dict[str, str] = {}  # for transition logging
@@ -201,13 +211,15 @@ class HMMRegimeDetector:
             # Get adjustment params
             params = REGIME_PARAMS.get(regime, REGIME_PARAMS["RANGING"])
 
+            prob_size_mult = self._probability_size_adjustment(state_probs)
             return {
                 "regime": regime,
                 "confidence": round(confidence, 4),
                 "state_probabilities": state_probs,
                 "transition_risk": round(transition_risk, 4),
                 "favor_direction": params["favor_direction"],
-                "size_multiplier": params["size_multiplier"],
+                "size_multiplier": round(params["size_multiplier"] * prob_size_mult, 4),
+                "probability_size_multiplier": prob_size_mult,
                 "sl_atr_mult": params["sl_atr_mult"],
                 "signal_type": params["signal_type"],
                 "n_bars_used": len(features),
@@ -264,6 +276,7 @@ class HMMRegimeDetector:
             "transition_risk": 0.5,
             "favor_direction": None,
             "size_multiplier": 1.0,
+            "probability_size_multiplier": 1.0,
             "sl_atr_mult": 2.5,
             "signal_type": "momentum",
             "n_bars_used": 0,

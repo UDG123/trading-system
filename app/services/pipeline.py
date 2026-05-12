@@ -270,6 +270,7 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                     enrichment["hmm_confidence"] = regime_info.get("confidence", 0)
                     enrichment["regime_size_mult"] = regime_info.get("size_multiplier", 1.0)
                     enrichment["regime_sl_atr_mult"] = regime_info.get("sl_atr_mult", 2.5)
+                    enrichment["hmm_state_probabilities"] = regime_info.get("state_probabilities", {})
                     # Store regime_label on the signal record
                     signal.desk_id = signal.desk_id  # ensure set
                     logger.info(
@@ -290,6 +291,13 @@ async def process_signal(signal_id: int, db: Session, webhook_latency_ms: int = 
                         continue
                     # Apply regime size multiplier to vix_size_modifier
                     regime_size = regime_info.get("size_multiplier", 1.0)
+                    probs = regime_info.get("state_probabilities", {})
+                    trend_prob = float(probs.get("TRENDING_UP", 0)) + float(probs.get("TRENDING_DOWN", 0))
+                    ranging_prob = float(probs.get("RANGING", 0))
+                    if trend_prob > ranging_prob:
+                        regime_size = max(regime_size, 1.05)
+                    elif ranging_prob > trend_prob:
+                        regime_size = min(regime_size, 0.95)
                     if regime_size != 1.0:
                         vix_size_modifier *= regime_size
             except Exception as e:
