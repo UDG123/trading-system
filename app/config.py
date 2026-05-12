@@ -1,4 +1,34 @@
 import os
+
+import json
+from copy import deepcopy
+
+
+def _apply_desk_overrides(base_desks: dict) -> dict:
+    """Load per-desk runtime tuning from JSON file path in DESK_CONFIG_PATH."""
+    cfg_path = os.getenv("DESK_CONFIG_PATH", "").strip()
+    if not cfg_path:
+        return base_desks
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        desks = deepcopy(base_desks)
+        for desk_id, overrides in (payload.get("desks") or {}).items():
+            if desk_id in desks and isinstance(overrides, dict):
+                desks[desk_id].update(overrides)
+        return desks
+    except Exception:
+        return base_desks
+
+
+def get_quality_thresholds(desk_id: str) -> dict:
+    desk = DESKS.get(desk_id, {})
+    quality = desk.get("quality_thresholds", {})
+    return {
+        "min_quality": float(quality.get("min_quality", os.getenv("MIN_FINAL_SIGNAL_QUALITY", 50))),
+        "min_probability": float(quality.get("min_probability", os.getenv("MIN_SIGNAL_PROBABILITY", 0.52))),
+    }
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -104,7 +134,7 @@ VALID_ALERT_TYPES = {
     "smc_equal_lows", "smc_bullish_ob_break", "smc_bearish_ob_break",
 }
 
-DESKS = {
+_BASE_DESKS = {
     "DESK1_SCALPER": {
         "name": "FX Scalper", "role": "FX_SCALP", "risk_pct": 0.25, "max_simultaneous": 2,
         "max_trades_day": 8, "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"],
@@ -136,6 +166,8 @@ DESKS = {
         "timeframes": {"entry": "15M", "confirm": "1H", "bias": "D"},
     },
 }
+
+DESKS = _apply_desk_overrides(_BASE_DESKS)
 
 SYMBOL_ALIASES = {
     "OANDA:EURUSD": "EURUSD", "OANDA:GBPUSD": "GBPUSD", "OANDA:USDJPY": "USDJPY",
@@ -194,6 +226,10 @@ def get_pip_info(symbol: str) -> dict:
 
 
 def get_atr_settings(desk_id: str, symbol: str, timeframe: str) -> dict:
+    desk = DESKS.get(desk_id, {})
+    cfg = (desk.get("atr_multipliers") or {}).get(timeframe) or desk.get("atr_multipliers") or {}
+    if cfg:
+        return {"sl_mult": float(cfg.get("sl_mult", 1.5)), "tp1_mult": float(cfg.get("tp1_mult", 3.0)), "tp2_mult": float(cfg.get("tp2_mult", 4.5))}
     if symbol == "XAUUSD":
         return {"sl_mult": 1.5, "tp1_mult": 3.0, "tp2_mult": 5.0}
     if desk_id == "DESK1_SCALPER":

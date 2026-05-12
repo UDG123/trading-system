@@ -54,6 +54,7 @@ class MetaLabeler:
         "is_squeeze", "atr_to_sl_ratio", "cvd_slope",
         "cvd_divergence_dist", "cvd_divergence_accum",
         "above_cloud", "below_cloud", "ema50_slope",
+        "dxy_change", "yield_curve_2s10s", "yield_curve_3m10y",
     ]
 
     def train(self, db: Session) -> Dict:
@@ -140,6 +141,9 @@ class MetaLabeler:
                     float(fv.get("above_cloud", 0) or 0),
                     float(fv.get("below_cloud", 0) or 0),
                     float(fv.get("ema50_slope", 0) or 0),
+                    float(fv.get("dxy_change", 0) or 0),
+                    float(fv.get("yield_curve_2s10s", 0) or 0),
+                    float(fv.get("yield_curve_3m10y", 0) or 0),
                 ])
 
                 features.append(row)
@@ -288,6 +292,9 @@ class MetaLabeler:
                 float(features.get("above_cloud", 0)),
                 float(features.get("below_cloud", 0)),
                 float(features.get("ema50_slope", 0)),
+                float(features.get("dxy_change", 0)),
+                float(features.get("yield_curve_2s10s", 0)),
+                float(features.get("yield_curve_3m10y", 0)),
             ])
 
             # Trim to model's expected feature count (handles old models with fewer features)
