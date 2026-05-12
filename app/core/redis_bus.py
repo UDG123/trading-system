@@ -1,6 +1,6 @@
-import json
 import redis
 from app.config import settings
+from app.utils.json_safe import dumps_json_safe
 
 STREAMS = {
     'raw': 'oniquant:signals:raw',
@@ -19,7 +19,7 @@ def get_redis() -> redis.Redis:
 
 def publish_event(stream: str, event: dict) -> str:
     try:
-        return get_redis().xadd(stream, {'payload': json.dumps(event, default=str)})
+        return get_redis().xadd(stream, {'payload': dumps_json_safe(event)})
     except Exception:
         return 'offline'
 
@@ -39,5 +39,5 @@ def ack_event(stream: str, group: str, message_id: str):
 
 async def publish_signal(redis_client, payload: dict) -> str:
     """Publish an internal-engine signal using the worker-compatible stream format."""
-    body = json.dumps(payload, default=str)
+    body = dumps_json_safe(payload)
     return await redis_client.xadd("oniquant_alerts", {"payload": body})
