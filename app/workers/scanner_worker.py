@@ -11,6 +11,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -24,6 +25,7 @@ from app.config import (
     WORKER_SCANNER_ENABLED,
 )
 from app.core.redis_bus import publish_signal
+from app.core.event_bus import EventBus
 from app.services.data_providers.base import MarketDataProvider, get_market_data_provider
 from app.services.signal_engine.candle_manager import CandleManager
 from app.services.signal_engine.desk_scanner import DeskScanner
@@ -38,6 +40,8 @@ _shutdown = asyncio.Event()
 class ScanSummary:
     scanned_symbols: int = 0
     candidates_emitted: int = 0
+    blocked_candidates: int = 0
+    approved_signals: int = 0
     skipped_due_to_data: int = 0
     errors: int = 0
 
@@ -45,6 +49,8 @@ class ScanSummary:
         return {
             "scanned_symbols": self.scanned_symbols,
             "candidates_emitted": self.candidates_emitted,
+            "blocked_candidates": self.blocked_candidates,
+            "approved_signals": self.approved_signals,
             "skipped_due_to_data": self.skipped_due_to_data,
             "errors": self.errors,
         }
@@ -64,6 +70,7 @@ class InternalScannerWorker:
         self.redis = redis
         self.dedup_cooldown_seconds = dedup_cooldown_seconds or INTERNAL_SIGNAL_DEDUP_MINUTES * 60
         self._dedup_seen: dict[str, float] = {}
+        self.event_bus = EventBus(redis_client=redis)
 
     async def start(self) -> None:
         if not WORKER_SCANNER_ENABLED:
@@ -71,11 +78,12 @@ class InternalScannerWorker:
             return
         if self.redis is None:
             self.redis = aioredis.from_url(REDIS_URL, decode_responses=False)
+        self.event_bus = EventBus(redis_client=self.redis)
         logger.info("Internal scanner started | provider=%s | interval=%ss", self.provider.provider_name, INTERNAL_SCANNER_INTERVAL_SECONDS)
         while not _shutdown.is_set():
             started = time.monotonic()
             summary = await self.run_cycle()
-            logger.info("Scanner cycle summary | %s", summary.as_dict())
+            logger.info("desk_scan_summary | %s", summary.as_dict())
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(1, INTERNAL_SCANNER_INTERVAL_SECONDS - elapsed))
 
@@ -89,6 +97,7 @@ class InternalScannerWorker:
             entry_tf = DeskScanner._get_entry_tf(desk.get("timeframes", {}))
             symbols = desk.get("symbols", [])
             loaded_for_desk = 0
+            skip_reasons = {}
             for symbol in symbols:
                 if scanned_this_cycle >= limit:
                     break
@@ -96,18 +105,23 @@ class InternalScannerWorker:
                 summary.scanned_symbols += 1
                 try:
                     candles = await self.provider.get_candles(symbol, entry_tf, limit=300)
-                    if not candles:
+                    if not candles or len(candles) < 10:
                         summary.skipped_due_to_data += 1
+                        skip_reasons[symbol] = "insufficient_bars"
+                        await self.event_bus.emit_pipeline_health({"event_type":"pipeline.health","desk":desk_id,"symbol":symbol,"timestamp":time.time(),"reason":"insufficient_bars"})
                         continue
                     loaded = self.candle_manager.update_dataframe(symbol, entry_tf, candles)
                     if loaded <= 0:
                         summary.skipped_due_to_data += 1
+                        skip_reasons[symbol] = "insufficient_bars"
                         continue
                     loaded_for_desk += 1
                 except Exception as exc:
                     summary.errors += 1
+                    skip_reasons[symbol] = f"load_error:{exc}"
                     logger.warning("Scanner data load failed | %s %s %s | %s", desk_id, symbol, entry_tf, exc)
             if not loaded_for_desk:
+                logger.info("desk_scan_summary | %s", {"desk": desk_id, "symbols_configured": len(symbols), "symbols_ready": 0, "skip_reasons": skip_reasons})
                 continue
             try:
                 candidates = self.scanner.scan_desk(desk_id)
@@ -121,9 +135,20 @@ class InternalScannerWorker:
                         continue
                     payload = self.scanner.build_signal_payload(candidate)
                     payload["source"] = "internal_engine"
+                    candidate_id = f"{candidate.get('desk_id')}:{candidate.get('symbol')}:{candidate.get('timeframe')}:{int(time.time()*1000)}"
+                    generated = {"event_type":"candidate.generated","candidate_id":candidate_id,"desk":candidate.get("desk_id"),"symbol":candidate.get("symbol"),"side":candidate.get("direction"),"timeframe":candidate.get("timeframe"),"timestamp":datetime.utcnow().isoformat(),"provenance":{"source":"scanner_worker"},"candidate":candidate}
+                    await self.event_bus.emit_candidate_generated(generated)
+                    summary.candidates_emitted += 1
                     if publish:
                         await publish_signal(self.redis, payload)
-                    summary.candidates_emitted += 1
+                    if payload.get("quality_blocked"):
+                        summary.blocked_candidates += 1
+                        blocked = {"event_type":"candidate.blocked","candidate_id":candidate_id,"desk":candidate.get("desk_id"),"symbol":candidate.get("symbol"),"side":candidate.get("direction"),"timestamp":datetime.utcnow().isoformat(),"probability":payload.get("signal_probability"),"final_quality":payload.get("final_signal_quality"),"block_reasons":payload.get("quality_block_reasons") or ["quality_gate"],"gate_config_snapshot":{"min_probability":os.getenv("MIN_SIGNAL_PROBABILITY","0.52"),"min_quality":os.getenv("MIN_FINAL_SIGNAL_QUALITY","50")},"candidate_ref":generated}
+                        await self.event_bus.emit_candidate_blocked(blocked)
+                    else:
+                        summary.approved_signals += 1
+                        approved={"event_type":"signal.approved","signal_id":payload.get("event_id",candidate_id),"candidate_id":candidate_id,"desk":candidate.get("desk_id"),"symbol":candidate.get("symbol"),"side":candidate.get("direction"),"timestamp":datetime.utcnow().isoformat(),"probability":payload.get("signal_probability"),"final_quality":payload.get("final_signal_quality"),"provenance":{"source":"scanner_worker"}}
+                        await self.event_bus.emit_signal_approved(approved)
                 except Exception as exc:
                     summary.errors += 1
                     logger.warning("Candidate publish failed | %s | %s", candidate, exc)
